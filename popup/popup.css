@@ -1,0 +1,572 @@
+:root {
+    --bg-color: #1a1a1a;
+    --text-primary: #e1e9ee;
+    --text-secondary: #94a3b8;
+    --accent-color: #0a66c2;
+    --accent-hover: #004182;
+    --border-color: #334155;
+    --input-bg: #2d3748;
+    --card-bg: #242c38;
+}
+
+body {
+    width: 100%;
+    min-width: 380px;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow: hidden;
+}
+
+.app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* Navigation */
+.main-nav {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--card-bg);
+}
+
+.nav-item {
+    flex: 1;
+    background: none;
+    border: none;
+    padding: 12px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+}
+
+.nav-item:hover {
+    color: var(--text-primary);
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.nav-item.active {
+    color: var(--accent-color);
+    border-bottom-color: var(--accent-color);
+}
+
+/* Main Content */
+.content-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    position: relative;
+}
+
+.view {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Sections */
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+h2,
+h3,
+h4 {
+    margin: 0;
+    font-size: 14px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+h2 {
+    font-size: 16px;
+    color: var(--text-primary);
+    text-transform: none;
+}
+
+/* Inputs */
+.input-group,
+.settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+textarea,
+input,
+select {
+    background-color: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
+    resize: vertical;
+}
+
+textarea:focus,
+input:focus,
+select:focus {
+    border-color: var(--accent-color);
+    outline: none;
+}
+
+/* Cards */
+.config-card,
+.strategy-card,
+.settings-card,
+.score-card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.card-body {
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+details>summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--accent-color);
+    list-style: none;
+}
+
+details>summary::-webkit-details-marker {
+    display: none;
+}
+
+/* Strategy */
+.strategy-controls {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.control {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* Buttons */
+.primary-btn {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 12px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+    margin-top: 8px;
+}
+
+.primary-btn:hover {
+    background-color: var(--accent-hover);
+}
+
+.primary-btn:disabled {
+    background-color: var(--border-color);
+    cursor: not-allowed;
+}
+
+.secondary-btn {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    width: 100%;
+}
+
+.secondary-btn:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+/* Results Grid */
+.scores-grid {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+}
+
+.score-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    text-align: center;
+}
+
+.score-circle {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: var(--input-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: bold;
+    border: 3px solid var(--border-color);
+}
+
+.score-high {
+    border-color: #4caf50;
+    color: #4caf50;
+}
+
+.score-med {
+    border-color: #ffc107;
+    color: #ffc107;
+}
+
+.score-low {
+    border-color: #f44336;
+    color: #f44336;
+}
+
+/* Badge */
+.badge-card {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.role-badge {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: var(--input-bg);
+    color: var(--text-secondary);
+}
+
+.role-buyer {
+    background: rgba(76, 175, 80, 0.2);
+    color: #4caf50;
+}
+
+.role-influencer {
+    background: rgba(255, 193, 7, 0.2);
+    color: #ffc107;
+}
+
+/* Drafts */
+.draft-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 12px;
+}
+
+.draft-tab {
+    flex: 1;
+    background: none;
+    border: none;
+    padding: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+}
+
+.draft-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent-color);
+}
+
+.draft-content {
+    background-color: var(--input-bg);
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
+/* Accordion Details */
+.accordion-body {
+    padding: 8px 0;
+}
+
+.accordion-body h4 {
+    margin: 8px 0 4px 0;
+    color: var(--accent-color);
+}
+
+ul {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+li {
+    margin-bottom: 4px;
+}
+
+/* Status & Logs */
+.status-badge {
+    background: var(--input-bg);
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.status-pill {
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: bold;
+    color: var(--text-secondary);
+}
+
+.log-box {
+    height: 150px;
+    overflow-y: auto;
+    background: black;
+    color: #00ff00;
+    font-family: monospace;
+    font-size: 10px;
+    padding: 8px;
+    border-radius: 4px;
+}
+
+.log-entry {
+    margin-bottom: 4px;
+    border-bottom: 1px solid #333;
+}
+
+.log-ts {
+    color: #666;
+    margin-right: 6px;
+}
+
+/* Banner */
+.context-banner {
+    background: rgba(255, 215, 0, 0.1);
+    border: 1px solid rgba(255, 215, 0, 0.3);
+    border-radius: 6px;
+    padding: 10px;
+    margin: 12px 0;
+}
+
+.context-header {
+    color: #ffd700;
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.badges-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.context-badge {
+    background: rgba(255, 215, 0, 0.2);
+    color: #ffd700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+}
+
+.empty-state {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 40px 0;
+}
+
+pre {
+    white-space: pre-wrap;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.debug-section summary {
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-secondary);
+    user-select: none;
+}
+
+.log-content {
+    margin-top: 8px;
+    background-color: black;
+    color: #00ff00;
+    font-family: var(--code-font);
+    font-size: 11px;
+    padding: 8px;
+    border-radius: 4px;
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.log-entry {
+    margin-bottom: 2px;
+    border-bottom: 1px solid #333;
+}
+
+.log-ts {
+    color: #666;
+    margin-right: 4px;
+}
+
+/* Strategy Banner */
+.strategy-banner {
+    background: rgba(10, 102, 194, 0.1);
+    border: 1px solid rgba(10, 102, 194, 0.3);
+    border-radius: 6px;
+    padding: 10px;
+    margin: 12px 0;
+}
+
+.strategy-header {
+    color: var(--accent-color);
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.strategy-text {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.strategy-timing {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-style: italic;
+}
+
+/* Variant and Sequence Sections */
+.variant-section, .sequence-item {
+    margin-bottom: 16px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 4px;
+}
+
+.variant-section strong, .sequence-item strong {
+    color: var(--accent-color);
+    display: block;
+    margin-bottom: 4px;
+}
+
+/* Confidence Indicator */
+.confidence-indicator {
+    margin-bottom: 12px;
+    padding: 8px;
+    background: var(--input-bg);
+    border-radius: 4px;
+}
+
+.confidence-high {
+    color: #4caf50;
+    font-weight: 600;
+}
+
+.confidence-medium {
+    color: #ffc107;
+    font-weight: 600;
+}
+
+.confidence-low {
+    color: #f44336;
+    font-weight: 600;
+}
+
+/* Related Profiles */
+.related-profile-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.profile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+.profile-info {
+    flex: 1;
+}
+
+.profile-link {
+    color: var(--accent-color);
+    text-decoration: none;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.profile-link:hover {
+    text-decoration: underline;
+}
+
+.profile-headline {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+.relevance-score {
+    font-size: 18px;
+    font-weight: bold;
+    min-width: 40px;
+    text-align: right;
+}
+
+.profile-details {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 8px;
+}
+
+.profile-details > div {
+    margin-bottom: 4px;
+}
+
+.profile-details strong {
+    color: var(--text-primary);
+}

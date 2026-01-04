@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sales Copilot</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Main Navigation -->
+        <nav class="main-nav">
+            <button class="nav-item active" data-target="tab-compose">Compose</button>
+            <button class="nav-item" data-target="tab-results">Results</button>
+            <button class="nav-item" data-target="tab-settings">Settings</button>
+        </nav>
+
+        <main class="content-area">
+            <!-- TAB 1: COMPOSE (Inputs) -->
+            <div id="tab-compose" class="view active">
+                <header class="section-header">
+                    <h2>Outreach Setup</h2>
+                    <div class="status-badge" id="statusBadge">Ready</div>
+                </header>
+
+                <section class="input-group">
+                    <label for="userGoal">Outreach Goal</label>
+                    <textarea id="userGoal" placeholder="E.g., Sell enterprise SEO services..."></textarea>
+                </section>
+
+                <section class="input-group">
+                    <label for="icpDefinition">ICP Definition</label>
+                    <textarea id="icpDefinition" placeholder="E.g., B2B SaaS, 50-200 employees..."></textarea>
+                </section>
+
+                <details class="config-card">
+                    <summary>Seller Configuration (You)</summary>
+                    <div class="card-body">
+                        <label>What you sell (Offer)</label>
+                        <textarea id="offerDetails" placeholder="One-liner + details..."></textarea>
+
+                        <label>Proof Points</label>
+                        <textarea id="proofPoints" placeholder="Metrics, case studies..."></textarea>
+                    </div>
+                </details>
+
+                <section class="strategy-card">
+                    <h3>Strategy</h3>
+                    <div class="strategy-controls">
+                        <div class="control">
+                            <label>Risk Level</label>
+                            <select id="riskLevel">
+                                <option value="Safe">Safe</option>
+                                <option value="Contextual" selected>Contextual</option>
+                                <option value="Risky">Risky</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label>Offer Type</label>
+                            <select id="offerType">
+                                <option value="Audit">Audit</option>
+                                <option value="Demo">Demo</option>
+                                <option value="Pilot">Pilot</option>
+                                <option value="Workshop">Workshop</option>
+                                <option value="Chat">Chat</option>
+                                <option value="Advice">Advice</option>
+                                <option value="Consultation">Consultation</option>
+                                <option value="Training">Training</option>
+                                <option value="Implementation">Implementation</option>
+                                <option value="Migration">Migration</option>
+                                <option value="Upgrade">Upgrade</option>
+                                <option value="Migration">Migration</option>
+                            </select>
+                        </div>
+                    </div>
+                </section>
+
+                <button id="analyzeBtn" class="primary-btn">Analyze Profile</button>
+                <button id="regenerateBtn" class="secondary-btn hidden" style="margin-top: 8px;">Regenerate Messages (Reuse Research)</button>
+            </div>
+
+            <!-- TAB 2: RESULTS -->
+            <div id="tab-results" class="view hidden">
+                <div id="emptyState" class="empty-state">
+                    Run analysis to see results here.
+                </div>
+
+                <div id="resultsContent" class="hidden">
+                    <!-- Scores -->
+                    <div class="scores-grid">
+                        <div class="score-card">
+                            <div class="score-circle" id="scoreCircle"><span id="scoreValue">--</span></div>
+                            <label>Fit</label>
+                        </div>
+                        <div class="score-card">
+                            <div class="score-circle" id="influenceCircle"><span id="influenceValue">--</span></div>
+                            <label>Influence</label>
+                        </div>
+                        <div class="badge-card">
+                            <span id="roleMappingBadge" class="role-badge">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Shared Context -->
+                    <div id="sharedContextSection" class="context-banner hidden">
+                        <div class="context-header">
+                            <strong>Shared Context</strong>
+                            <span id="contextScore">--%</span>
+                        </div>
+                        <div id="contextBadges" class="badges-row"></div>
+                    </div>
+
+                    <!-- Outreach Strategy -->
+                    <div id="outreachStrategySection" class="strategy-banner hidden">
+                        <div class="strategy-header">
+                            <strong>Recommended Approach</strong>
+                            <span id="strategyApproach">--</span>
+                        </div>
+                        <div id="strategyRationale" class="strategy-text"></div>
+                        <div id="strategyTiming" class="strategy-timing"></div>
+                    </div>
+
+                    <!-- Drafts -->
+                    <div class="drafts-container">
+                        <div class="draft-tabs">
+                            <button class="draft-tab active" data-draft="connRequest">Connect</button>
+                            <button class="draft-tab" data-draft="coldEmail">Email</button>
+                            <button class="draft-tab" data-draft="messageVariants">Variants</button>
+                            <button class="draft-tab" data-draft="messageSequence">Sequence</button>
+                        </div>
+                        <div id="connRequest" class="draft-content active"></div>
+                        <div id="coldEmail" class="draft-content hidden"></div>
+                        <div id="messageVariants" class="draft-content hidden"></div>
+                        <div id="messageSequence" class="draft-content hidden"></div>
+                    </div>
+
+                    <!-- Details Accordions -->
+                    <details class="details-accordion">
+                        <summary>Analysis Details</summary>
+                        <div class="accordion-body">
+                            <h4>Fit Reasons</h4>
+                            <ul id="fitReasonsList"></ul>
+                            <h4>Trigger Signals</h4>
+                            <ul id="triggerSignalsList"></ul>
+                            <h4>Mismatches</h4>
+                            <ul id="mismatchesList"></ul>
+                            <h4>Missing Info</h4>
+                            <ul id="missingInfoList"></ul>
+                            <h4>Decision Logic</h4>
+                            <ul id="decisionReasoningList"></ul>
+                            <h4>Alternates</h4>
+                            <ul id="alternateTargetsList"></ul>
+                            <h4>Multi-Thread Targets</h4>
+                            <ul id="multiThreadTargetsList"></ul>
+                        </div>
+                    </details>
+
+                    <!-- Transparency Layer -->
+                    <details class="details-accordion">
+                        <summary>Transparency & Guidance</summary>
+                        <div class="accordion-body">
+                            <div class="confidence-indicator">
+                                <strong>Confidence:</strong> <span id="confidenceBadge">--</span>
+                            </div>
+                            <h4>Signals Used</h4>
+                            <ul id="signalsUsedList"></ul>
+                            <h4>Do Say</h4>
+                            <ul id="doSayList"></ul>
+                            <h4>Don't Say</h4>
+                            <ul id="dontSayList"></ul>
+                        </div>
+                    </details>
+
+                    <!-- Related Profiles -->
+                    <details class="details-accordion">
+                        <summary>Related Prospects</summary>
+                        <div class="accordion-body">
+                            <div id="relatedProfilesContainer">
+                                <p class="empty-state">No related profiles analyzed yet.</p>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+            </div>
+
+            <!-- TAB 3: SETTINGS -->
+            <div id="tab-settings" class="view hidden">
+                <section class="settings-group">
+                    <h3>API Configuration</h3>
+                    <label>OpenAI API Key</label>
+                    <input type="password" id="apiKey" placeholder="sk-..." />
+                    <small>Stored locally.</small>
+                </section>
+
+                <section class="settings-group">
+                    <h3>Sender Profile</h3>
+                    <p>Capture your profile to enable "Shared Context" matching.</p>
+                    <button id="captureProfileBtn" class="secondary-btn">Capture My Profile</button>
+                    <div id="senderProfileStatus" class="status-pill">Not cached</div>
+
+                    <!-- New: Profile Preview -->
+                    <details class="profile-preview">
+                        <summary>View Cached Data</summary>
+                        <pre id="cachedProfilePreview">No data.</pre>
+                    </details>
+                </section>
+
+                <section class="settings-group">
+                    <!-- Debug Logs -->
+                    <details>
+                        <summary>Debug Logs</summary>
+                        <div id="debugLog" class="log-box"></div>
+                    </details>
+                </section>
+            </div>
+        </main>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>
