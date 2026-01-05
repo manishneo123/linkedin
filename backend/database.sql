@@ -11,10 +11,27 @@ CREATE TABLE IF NOT EXISTS users (
     used INT NOT NULL DEFAULT 0,
     name VARCHAR(255),
     linkedin_profile_url VARCHAR(500),
+    api_key VARCHAR(255) UNIQUE,
+    api_key_created_at TIMESTAMP NULL,
+    last_api_call_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_created_at (created_at),
-    INDEX idx_linkedin_profile_url (linkedin_profile_url)
+    INDEX idx_linkedin_profile_url (linkedin_profile_url),
+    INDEX idx_api_key (api_key),
+    INDEX idx_last_api_call_at (last_api_call_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- API rate limiting table
+CREATE TABLE IF NOT EXISTS api_rate_limits (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    api_key VARCHAR(255) NOT NULL,
+    endpoint VARCHAR(255) NOT NULL,
+    request_count INT NOT NULL DEFAULT 1,
+    window_start TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_api_key_endpoint (api_key, endpoint),
+    INDEX idx_window_start (window_start)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Prospects table (for tracking analyzed prospects)

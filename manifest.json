@@ -7,7 +7,14 @@
     "activeTab",
     "scripting",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "tabs"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["popup/documentation.html"],
+      "matches": ["<all_urls>"]
+    }
   ],
   "host_permissions": [
     "https://www.linkedin.com/*",

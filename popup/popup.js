@@ -21,6 +21,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const useBackendCreditsCheckbox = document.getElementById('useBackendCredits');
     const creditsSection = document.getElementById('creditsSection');
     const apiKeySection = document.getElementById('apiKeySection');
+    const copyEmailBtn = document.querySelector('.copy-email-btn-modern');
+    const supportEmail = document.getElementById('supportEmail');
+    const openDocumentationBtn = document.getElementById('openDocumentationBtn');
 
     // Status
     const statusBadge = document.getElementById('statusBadge');
@@ -83,9 +86,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         debugLog.scrollTop = debugLog.scrollHeight;
     }
 
-    function updateStatus(msg) {
+    // Settings status indicator
+    const settingsStatusIndicator = document.getElementById('settingsStatusIndicator');
+
+    function updateStatus(msg, showInSettings = false) {
+        if (statusBadge) {
         statusBadge.textContent = msg;
-        log(`Status status: ${msg}`);
+        }
+        log(`Status: ${msg}`);
+        
+        // Also update settings status if requested
+        if (showInSettings && settingsStatusIndicator) {
+            settingsStatusIndicator.textContent = msg;
+            settingsStatusIndicator.style.display = 'block';
+            settingsStatusIndicator.className = 'settings-status-indicator show';
+            // Clear after 3 seconds if it's a success message
+            if (msg.includes('Complete') || msg.includes('successfully') || msg.includes('Cached') || msg.includes('Ready')) {
+                setTimeout(() => {
+                    if (settingsStatusIndicator) {
+                        settingsStatusIndicator.style.display = 'none';
+                        settingsStatusIndicator.className = 'settings-status-indicator';
+                    }
+                }, 3000);
+            }
+        }
     }
 
     log("Extension loaded. Initializing...");
@@ -93,6 +117,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // === Backend Configuration ===
     const BACKEND_URL = 'http://localhost:3000'; // Change to your production URL
     let userId = null;
+    let apiKey = null;
 
     // Get or create user ID
     async function getUserId() {
@@ -105,6 +130,47 @@ document.addEventListener('DOMContentLoaded', async () => {
             await chrome.storage.local.set({ user_id: userId });
         }
         return userId;
+    }
+
+    // Get or generate API key
+    async function getApiKey() {
+        if (apiKey) return apiKey;
+        
+        // Check if API key is stored
+        const stored = await chrome.storage.local.get('api_key');
+        if (stored.api_key) {
+            apiKey = stored.api_key;
+            return apiKey;
+        }
+        
+        // Generate new API key from backend
+        try {
+            const currentUserId = await getUserId();
+            const response = await fetch(`${BACKEND_URL}/api/auth/generate-key`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-user-id': currentUserId
+                },
+                body: JSON.stringify({ userId: currentUserId })
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to generate API key');
+            }
+            
+            const data = await response.json();
+            apiKey = data.apiKey;
+            
+            // Store API key securely
+            await chrome.storage.local.set({ api_key: apiKey });
+            
+            log(`[Auth] API key generated and stored`);
+            return apiKey;
+        } catch (error) {
+            log(`[Auth] Error generating API key: ${error.message}`);
+            throw error;
+        }
     }
 
     // === Credit Management System ===
@@ -130,9 +196,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function getCredits() {
         try {
             const currentUserId = await getUserId();
+            const currentApiKey = await getApiKey();
             const response = await fetch(`${BACKEND_URL}/api/credits`, {
                 headers: {
-                    'x-user-id': currentUserId
+                    'x-api-key': currentApiKey,
+                    'Content-Type': 'application/json'
                 }
             });
             
@@ -193,7 +261,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     /**
      * Wrapper for GPT API calls with credit tracking
      */
-    async function callGPTWithTracking(url, options, model = 'gpt-4o-mini', userApiKey = null, processType = 'gpt_api_call', processDescription = null, prospectId = null) {
+    async function callGPTWithTracking(url, options, model = 'gpt-4o-mini', userApiKey = null, processType = 'gpt_api_call', processDescription = null, prospectId = null,currentUserId) {
         const useBackend = useBackendCreditsCheckbox.checked;
         
         // If user has their own API key and backend is disabled, use it directly
@@ -225,12 +293,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // Call backend proxy
-        const currentUserId = await getUserId();
+        const currentApiKey = await getApiKey();
         const response = await fetch(`${BACKEND_URL}/api/openai-proxy`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-user-id': currentUserId
+                'x-api-key': currentApiKey
             },
             body: JSON.stringify({
                 request: requestBody,
@@ -342,15 +410,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             const packageId = parseInt(e.target.dataset.packageId);
             
             try {
-                const currentUserId = await getUserId();
+                const currentApiKey = await getApiKey();
                 const response = await fetch(`${BACKEND_URL}/api/create-checkout-session`, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
+                        'x-api-key': currentApiKey
                     },
                     body: JSON.stringify({
                         packageId: packageId,
-                        userId: currentUserId,
                         currency: currentCurrency
                     })
                 });
@@ -581,27 +649,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     captureProfileBtn.addEventListener('click', async () => {
+        // Disable button to prevent multiple clicks
+        captureProfileBtn.disabled = true;
+        captureProfileBtn.style.opacity = '0.6';
+        captureProfileBtn.style.cursor = 'not-allowed';
+        const originalText = captureProfileBtn.textContent;
+        captureProfileBtn.textContent = 'Capturing...';
+        
         try {
+            //alert('Capture Profile Button Clicked');
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             if (!tab || !tab.url.includes('linkedin.com/in/')) {
+                captureProfileBtn.disabled = false;
+                captureProfileBtn.style.opacity = '1';
+                captureProfileBtn.style.cursor = 'pointer';
+                captureProfileBtn.textContent = originalText;
                 alert('Navigate to your own LinkedIn profile first!');
                 return;
             }
-
-            updateStatus("Capturing...");
-            if (!(await ensureContentScript(tab.id))) throw new Error("Connection failed.");
+            // Show status in settings tab
+            updateStatus("Capturing...", true);
+            if (!(await ensureContentScript(tab.id))) {
+                updateStatus("Connection failed", true);
+                throw new Error("Connection failed.");
+            }
 
             const response = await chrome.tabs.sendMessage(tab.id, { action: 'SCRAPE_PROFILE' });
             log(`Response: success=${response?.success}, hasData=${!!response?.data}, hasStructured=${!!response?.structured}`);
-            if (!response?.success) throw new Error("Scrape failed.");
+            if (!response?.success) {
+                updateStatus("Scrape failed", true);
+                throw new Error("Scrape failed.");
+            }
 
             const now = new Date().toLocaleDateString();
             const data = response.data;
 
             // Use GPT to extract structured data (including premium status)
-            updateStatus("Analyzing with GPT...");
+            updateStatus("Analyzing with GPT...", true);
             log("Calling GPT to extract structured data...");
-            const structured = await extractProfileWithGPT(data, apiKeyInput.value);
+            const currentUserId = await getUserId();
+            console.log("Current user ID: " + currentUserId);
+            const structured = await extractProfileWithGPT(data, apiKeyInput.value,currentUserId);
             log('GPT extraction complete. Name: \"${structured.name}\"');
 
             log(`Structured name: "${structured?.name || 'EMPTY'}"`);
@@ -623,6 +711,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             senderProfileStatus.textContent = `Cached: ${now} `;
             senderProfileStatus.style.color = '#10b981';
+            
+            // Update status in settings
+            updateStatus("Profile captured successfully!", true);
 
             // Display premium status
             const premiumStatusEl = document.getElementById('senderPremiumStatus');
@@ -654,20 +745,30 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             cachedProfilePreview.textContent = preview;
-            updateStatus("Saved!");
+            updateStatus("Profile captured successfully!", true);
             log("Profile captured.");
-
         } catch (e) {
             alert(e.message);
-            updateStatus("Error");
+            updateStatus("Error", true);
+            log(`Profile capture error: ${e.message}`);
+        } finally {
+            // Re-enable button
+            captureProfileBtn.disabled = false;
+            captureProfileBtn.style.opacity = '1';
+            captureProfileBtn.style.cursor = 'pointer';
+            captureProfileBtn.textContent = originalText;
         }
     });
 
     /**
      * Extract structured profile data using GPT
      */
-    async function extractProfileWithGPT(profileText, apiKey) {
-        if (!apiKey) throw new Error("API key required for GPT extraction");
+    async function extractProfileWithGPT(profileText, apiKey, currentUserId) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        // Only require API key if not using backend credits
+        if (!useBackend && !apiKey) {
+            throw new Error("API key required for GPT extraction when not using backend credits");
+        }
 
         const prompt = `Extract structured profile information from this LinkedIn profile text.
 
@@ -739,7 +840,9 @@ Extract and return ONLY a JSON object with this exact structure:
             apiKey,
             'profile_extraction',
             'Extract structured profile data from LinkedIn profile text',
-            null
+            null,
+            currentUserId
+
         );
 
         if (!gptResponse.ok) {
@@ -760,8 +863,12 @@ Extract and return ONLY a JSON object with this exact structure:
     /**
      * Extract structured prospect data using GPT
      */
-    async function extractProspectWithGPT(profileText, activity, apiKey, relatedProfiles = null,prospectId) {
-        if (!apiKey) throw new Error("API key required for prospect extraction");
+    async function extractProspectWithGPT(profileText, activity, apiKey, relatedProfiles = null, prospectId, currentUserId) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        // Only require API key if not using backend credits
+        if (!useBackend && !apiKey) {
+            throw new Error("API key required for prospect extraction when not using backend credits");
+        }
 
         log("[ProspectExtract] Starting extraction...");
         log("[ProspectExtract] Profile text length:", profileText.length);
@@ -874,6 +981,7 @@ RULES:
             'post_summarization',
             'Summarize posts and extract prospect interests',
             prospectId || null
+            ,currentUserId
         );
 
         if (!response.ok) {
@@ -943,8 +1051,12 @@ RULES:
      * Summarize posts and extract prospect interests using GPT
      * Now filters to only include posts with important content
      */
-    async function summarizePostsAndExtractInterests(posts, postUrls, tabId, apiKey, prospectId = null) {
-        if (!apiKey) throw new Error("API key required for post summarization");
+    async function summarizePostsAndExtractInterests(posts, postUrls, tabId, apiKey, prospectId = null, currentUserId) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        // Only require API key if not using backend credits
+        if (!useBackend && !apiKey) {
+            throw new Error("API key required for post summarization when not using backend credits");
+        }
         
         let postsToAnalyze = [];
         
@@ -1160,8 +1272,12 @@ Rules:
     /**
      * Analyze related profiles to find relevant prospects
      */
-    async function analyzeRelatedProfiles(profiles, sellerGoal, icpDefinition, sellerOffer, apiKey,prospectId) {
-        if (!apiKey) throw new Error("API key required for profile analysis");
+    async function analyzeRelatedProfiles(profiles, sellerGoal, icpDefinition, sellerOffer, apiKey, prospectId) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        // Only require API key if not using backend credits
+        if (!useBackend && !apiKey) {
+            throw new Error("API key required for profile analysis when not using backend credits");
+        }
         if (!profiles || profiles.length === 0) {
             log("[RelatedProfiles] No profiles to analyze");
             return [];
@@ -1355,8 +1471,12 @@ Rules:
     /**
      * Research companies from prospect's experience in context of seller's offer
      */
-    async function researchCompanies(structuredProspect, sellerOffer, sellerGoal, icpDefinition, apiKey,prospectId) {
-        if (!apiKey) throw new Error("API key required for company research");
+    async function researchCompanies(structuredProspect, sellerOffer, sellerGoal, icpDefinition, apiKey, prospectId) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        // Only require API key if not using backend credits
+        if (!useBackend && !apiKey) {
+            throw new Error("API key required for company research when not using backend credits");
+        }
         if (!structuredProspect || !structuredProspect.experience || structuredProspect.experience.length === 0) {
             log("[CompanyResearch] No experience data available");
             return null;
@@ -1452,7 +1572,7 @@ Rules:
 
         log("[CompanyResearch] Sending research request to GPT...");
         const requestBody = {
-            model: "gpt-4o-mini",
+            model: "gpt-5.2",
             messages: [
                 { role: "system", content: "You are a sales research assistant. Analyze companies and return valid JSON only." },
                 { role: "user", content: prompt }
@@ -1470,7 +1590,7 @@ Rules:
                 },
                 body: JSON.stringify(requestBody)
             },
-            'gpt-4o-mini',
+            'gpt-5.2',
             apiKey,
             'company_research',
             'Research companies from prospect work history',
@@ -1518,6 +1638,127 @@ Rules:
         });
     }
 
+    // === Copy Email Address ===
+    if (copyEmailBtn) {
+        copyEmailBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const email = 'issues@gmail.com';
+            const success = await copyToClipboard(email);
+            
+            if (success) {
+                copyEmailBtn.innerHTML = '✓';
+                copyEmailBtn.style.color = '#10b981';
+                setTimeout(() => {
+                    copyEmailBtn.innerHTML = '📋';
+                    copyEmailBtn.style.color = '';
+                }, 2000);
+            } else {
+                copyEmailBtn.innerHTML = '✗';
+                copyEmailBtn.style.color = '#ef4444';
+                setTimeout(() => {
+                    copyEmailBtn.innerHTML = '📋';
+                    copyEmailBtn.style.color = '';
+                }, 2000);
+            }
+        });
+    }
+
+    // === Open Documentation ===
+    if (openDocumentationBtn) {
+        openDocumentationBtn.addEventListener('click', () => {
+            chrome.tabs.create({
+                url: chrome.runtime.getURL('popup/documentation.html')
+            });
+        });
+    }
+
+    // === Copy to Clipboard Helper ===
+    async function copyToClipboard(text) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return true;
+        } catch (err) {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            textArea.style.position = 'fixed';
+            textArea.style.opacity = '0';
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                return true;
+            } catch (fallbackErr) {
+                document.body.removeChild(textArea);
+                return false;
+            }
+        }
+    }
+
+    // === Add Copy Icon to Message ===
+    function addCopyIcon(container, messageText) {
+        if (!messageText || messageText === 'No draft.' || messageText === 'No variants generated.' || messageText === 'No sequence generated.') {
+            return; // Don't add copy icon for empty messages
+        }
+
+        // Create copy button
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'copy-icon-btn';
+        copyBtn.innerHTML = '📋';
+        copyBtn.title = 'Copy to clipboard';
+        copyBtn.setAttribute('aria-label', 'Copy message to clipboard');
+        
+        // Extract just the message text (remove HTML tags and strategy label)
+        let messageOnly = messageText;
+        
+        // For connection request and cold email, extract from container HTML
+        if (container.id === 'connRequest' || container.id === 'coldEmail') {
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = container.innerHTML;
+            const textContent = tempDiv.textContent || tempDiv.innerText || '';
+            // Remove strategy label (everything before the first double line break)
+            const parts = textContent.split('\n\n');
+            messageOnly = parts.length > 1 ? parts.slice(1).join('\n\n').trim() : textContent.trim();
+        } else {
+            // For variant and sequence items, use the message text directly
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = messageText;
+            messageOnly = tempDiv.textContent || tempDiv.innerText || messageText;
+        }
+        
+        copyBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const success = await copyToClipboard(messageOnly);
+            if (success) {
+                copyBtn.innerHTML = '✓';
+                copyBtn.style.color = '#10b981';
+                setTimeout(() => {
+                    copyBtn.innerHTML = '📋';
+                    copyBtn.style.color = '';
+                }, 2000);
+            } else {
+                copyBtn.innerHTML = '✗';
+                copyBtn.style.color = '#ef4444';
+                setTimeout(() => {
+                    copyBtn.innerHTML = '📋';
+                    copyBtn.style.color = '';
+                }, 2000);
+            }
+        });
+
+        // Insert copy button at the beginning of the container
+        if (container.firstChild) {
+            container.insertBefore(copyBtn, container.firstChild);
+        } else {
+            container.appendChild(copyBtn);
+        }
+    }
+
     function renderResults(data, riskStrategy) {
         emptyState.classList.add('hidden');
         resultsContent.classList.remove('hidden');
@@ -1535,9 +1776,13 @@ Rules:
         else roleMappingBadge.classList.add('role-avoid');
 
         // Shared Context Banner
-        if (data.sharedContextScore > 20) {
+        if (contextSection && data.sharedContextScore && data.sharedContextScore > 20) {
             contextSection.classList.remove('hidden');
+            contextSection.style.display = 'block';
+            if (contextScore) {
             contextScore.textContent = `${data.sharedContextScore} % Match`;
+            }
+            if (contextBadges) {
             contextBadges.innerHTML = '';
 
             (data.sharedSignals || []).forEach(signal => {
@@ -1546,8 +1791,14 @@ Rules:
                 badge.textContent = signal; // e.g., "🎓 Same College"
                 contextBadges.appendChild(badge);
             });
+            }
+            log(`[SharedContext] ✓ Displaying shared context: ${data.sharedContextScore}% match with ${data.sharedSignals?.length || 0} signals`);
         } else {
+            if (contextSection) {
             contextSection.classList.add('hidden');
+                contextSection.style.display = 'none';
+            }
+            log(`[SharedContext] Hidden - score: ${data.sharedContextScore || 'N/A'}`);
         }
 
         // Lists
@@ -1588,50 +1839,73 @@ Rules:
             strategyLabel += ` | ${data.outreachStrategy.recommendedApproach}`;
         }
 
-        document.getElementById('connRequest').innerHTML = `<strong>${strategyLabel}</strong><br/><br/>${data.connectionRequest || "No draft."}`;
-        document.getElementById('coldEmail').innerHTML = `<strong>${strategyLabel}</strong><br/><br/>${data.coldEmail || "No draft."}`;
+        const connRequestEl = document.getElementById('connRequest');
+        connRequestEl.innerHTML = `<strong>${strategyLabel}</strong><br/><br/>${data.connectionRequest || "No draft."}`;
+        addCopyIcon(connRequestEl, data.connectionRequest);
+
+        const coldEmailEl = document.getElementById('coldEmail');
+        coldEmailEl.innerHTML = `<strong>${strategyLabel}</strong><br/><br/>${data.coldEmail || "No draft."}`;
+        addCopyIcon(coldEmailEl, data.coldEmail);
 
         // Message Variants
+        const messageVariantsEl = document.getElementById('messageVariants');
         if (data.messageVariants) {
             let variantsHtml = `<strong>Message Variants</strong><br/><br/>`;
             if (data.messageVariants.shortPunchy) {
-                variantsHtml += `<div class="variant-section"><strong>Short Punchy:</strong><br/>${data.messageVariants.shortPunchy}</div><br/>`;
+                variantsHtml += `<div class="variant-section" data-message="${data.messageVariants.shortPunchy.replace(/"/g, '&quot;')}"><strong>Short Punchy:</strong><br/>${data.messageVariants.shortPunchy}</div><br/>`;
             }
             if (data.messageVariants.credibilityFirst) {
-                variantsHtml += `<div class="variant-section"><strong>Credibility-First:</strong><br/>${data.messageVariants.credibilityFirst}</div><br/>`;
+                variantsHtml += `<div class="variant-section" data-message="${data.messageVariants.credibilityFirst.replace(/"/g, '&quot;')}"><strong>Credibility-First:</strong><br/>${data.messageVariants.credibilityFirst}</div><br/>`;
             }
             if (data.messageVariants.insightLed) {
-                variantsHtml += `<div class="variant-section"><strong>Insight-Led / Value-First:</strong><br/>${data.messageVariants.insightLed}</div><br/>`;
+                variantsHtml += `<div class="variant-section" data-message="${data.messageVariants.insightLed.replace(/"/g, '&quot;')}"><strong>Insight-Led / Value-First:</strong><br/>${data.messageVariants.insightLed}</div><br/>`;
             }
             if (data.messageVariants.softAsk) {
-                variantsHtml += `<div class="variant-section"><strong>Soft-Ask / Low-Friction:</strong><br/>${data.messageVariants.softAsk}</div>`;
+                variantsHtml += `<div class="variant-section" data-message="${data.messageVariants.softAsk.replace(/"/g, '&quot;')}"><strong>Soft-Ask / Low-Friction:</strong><br/>${data.messageVariants.softAsk}</div>`;
             }
-            document.getElementById('messageVariants').innerHTML = variantsHtml;
+            messageVariantsEl.innerHTML = variantsHtml;
+            
+            // Add copy icons to each variant
+            messageVariantsEl.querySelectorAll('.variant-section').forEach(section => {
+                const messageText = section.getAttribute('data-message');
+                if (messageText) {
+                    addCopyIcon(section, messageText);
+                }
+            });
         } else {
-            document.getElementById('messageVariants').innerHTML = 'No variants generated.';
+            messageVariantsEl.innerHTML = 'No variants generated.';
         }
 
         // Message Sequence
+        const messageSequenceEl = document.getElementById('messageSequence');
         if (data.messageSequence) {
             let sequenceHtml = `<strong>Complete Outreach Sequence</strong><br/><br/>`;
             if (data.messageSequence.firstMessage) {
-                sequenceHtml += `<div class="sequence-item"><strong>First Message:</strong><br/>${data.messageSequence.firstMessage}</div><br/>`;
+                sequenceHtml += `<div class="sequence-item" data-message="${data.messageSequence.firstMessage.replace(/"/g, '&quot;')}"><strong>First Message:</strong><br/>${data.messageSequence.firstMessage}</div><br/>`;
             }
             if (data.messageSequence.followUp1) {
-                sequenceHtml += `<div class="sequence-item"><strong>Follow-up 1 (2-3 days):</strong><br/>${data.messageSequence.followUp1}</div><br/>`;
+                sequenceHtml += `<div class="sequence-item" data-message="${data.messageSequence.followUp1.replace(/"/g, '&quot;')}"><strong>Follow-up 1 (2-3 days):</strong><br/>${data.messageSequence.followUp1}</div><br/>`;
             }
             if (data.messageSequence.followUp2) {
-                sequenceHtml += `<div class="sequence-item"><strong>Follow-up 2 (1 week):</strong><br/>${data.messageSequence.followUp2}</div><br/>`;
+                sequenceHtml += `<div class="sequence-item" data-message="${data.messageSequence.followUp2.replace(/"/g, '&quot;')}"><strong>Follow-up 2 (1 week):</strong><br/>${data.messageSequence.followUp2}</div><br/>`;
             }
             if (data.messageSequence.followUp3) {
-                sequenceHtml += `<div class="sequence-item"><strong>Follow-up 3 (2 weeks):</strong><br/>${data.messageSequence.followUp3}</div><br/>`;
+                sequenceHtml += `<div class="sequence-item" data-message="${data.messageSequence.followUp3.replace(/"/g, '&quot;')}"><strong>Follow-up 3 (2 weeks):</strong><br/>${data.messageSequence.followUp3}</div><br/>`;
             }
             if (data.messageSequence.breakupMessage) {
-                sequenceHtml += `<div class="sequence-item"><strong>Breakup Message:</strong><br/>${data.messageSequence.breakupMessage}</div>`;
+                sequenceHtml += `<div class="sequence-item" data-message="${data.messageSequence.breakupMessage.replace(/"/g, '&quot;')}"><strong>Breakup Message:</strong><br/>${data.messageSequence.breakupMessage}</div>`;
             }
-            document.getElementById('messageSequence').innerHTML = sequenceHtml;
+            messageSequenceEl.innerHTML = sequenceHtml;
+            
+            // Add copy icons to each sequence item
+            messageSequenceEl.querySelectorAll('.sequence-item').forEach(item => {
+                const messageText = item.getAttribute('data-message');
+                if (messageText) {
+                    addCopyIcon(item, messageText);
+                }
+            });
         } else {
-            document.getElementById('messageSequence').innerHTML = 'No sequence generated.';
+            messageSequenceEl.innerHTML = 'No sequence generated.';
         }
     }
 
@@ -1850,7 +2124,7 @@ Also generate complete sequences:
         log("Sending request to OpenAI...");
         log("Final Prompt: " + prompt);
         const requestBody = {
-                model: "gpt-4o-mini",
+                model: "gpt-5.2",
                 messages: [
                     { role: "system", content: "You are a JSON-speaking sales strategist." },
                     { role: "user", content: prompt }
@@ -1868,7 +2142,7 @@ Also generate complete sequences:
                 },
                 body: JSON.stringify(requestBody)
             },
-            'gpt-4o-mini',
+            'gpt-5.2',
             inputs.apiKey,
             'sales_analysis',
             'Generate fit score, outreach strategy, and personalized messages',
@@ -1894,11 +2168,12 @@ Also generate complete sequences:
     async function saveAnalysisToBackend(analysisPayload) {
         try {
             const currentUserId = await getUserId();
+            const currentApiKey = await getApiKey();
             const response = await fetch(`${BACKEND_URL}/api/analyses`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-user-id': currentUserId
+                    'x-api-key': currentApiKey
                 },
                 body: JSON.stringify(analysisPayload)
             });
@@ -1929,38 +2204,58 @@ Also generate complete sequences:
 
     // === Regenerate Messages (Reuse Research) ===
     regenerateBtn.addEventListener('click', async () => {
-        const inputData = {
-            apiKey: apiKeyInput.value.trim(),
-            goal: userGoalInput.value.trim(),
-            icp: icpDefinitionInput.value.trim(),
-            offer: offerDetailsInput.value.trim(),
-            proof: proofPointsInput.value.trim(),
-            risk: riskLevelInput.value,
-            offerType: offerTypeInput.value
-        };
-
-        // Check if using backend credits or own API key
-        const useBackend = useBackendCreditsCheckbox.checked;
-        if (!useBackend && !inputData.apiKey) {
-            return updateStatus('Missing API Key');
-        }
-        if (!inputData.goal) return updateStatus('Missing Goal');
-
-        // Check credits if using backend
-        if (useBackend) {
-            const estimatedTokens = 5000; // Rough estimate for full analysis
-            const hasCredits = await hasEnoughCredits(estimatedTokens);
-            if (!hasCredits) {
-                const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
-                if (buyCredits) {
-                    showTab('tab-settings');
-                    buyCreditsBtn.click();
-                }
-                return updateStatus('Insufficient Credits');
-            }
-        }
-
+        // Disable button to prevent multiple clicks
+        regenerateBtn.disabled = true;
+        regenerateBtn.style.opacity = '0.6';
+        regenerateBtn.style.cursor = 'not-allowed';
+        const originalText = regenerateBtn.textContent;
+        regenerateBtn.textContent = 'Regenerating...';
+        
         try {
+            const inputData = {
+                apiKey: apiKeyInput.value.trim(),
+                goal: userGoalInput.value.trim(),
+                icp: icpDefinitionInput.value.trim(),
+                offer: offerDetailsInput.value.trim(),
+                proof: proofPointsInput.value.trim(),
+                risk: riskLevelInput.value,
+                offerType: offerTypeInput.value
+            };
+
+            // Check if using backend credits or own API key
+            const useBackend = useBackendCreditsCheckbox.checked;
+            if (!useBackend && !inputData.apiKey) {
+                regenerateBtn.disabled = false;
+                regenerateBtn.style.opacity = '1';
+                regenerateBtn.style.cursor = 'pointer';
+                regenerateBtn.textContent = originalText;
+                return updateStatus('Missing API Key');
+            }
+            if (!inputData.goal) {
+                regenerateBtn.disabled = false;
+                regenerateBtn.style.opacity = '1';
+                regenerateBtn.style.cursor = 'pointer';
+                regenerateBtn.textContent = originalText;
+                return updateStatus('Missing Goal');
+            }
+
+            // Check credits if using backend
+            if (useBackend) {
+                const estimatedTokens = 5000; // Rough estimate for full analysis
+                const hasCredits = await hasEnoughCredits(estimatedTokens);
+                if (!hasCredits) {
+                    regenerateBtn.disabled = false;
+                    regenerateBtn.style.opacity = '1';
+                    regenerateBtn.style.cursor = 'pointer';
+                    regenerateBtn.textContent = originalText;
+                    const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
+                    if (buyCredits) {
+                        showTab('tab-settings');
+                        buyCreditsBtn.click();
+                    }
+                    return updateStatus('Insufficient Credits');
+                }
+            }
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
             if (!tab || !tab.url.includes('linkedin.com/')) throw new Error('Go to LinkedIn Profile');
 
@@ -2000,19 +2295,18 @@ Also generate complete sequences:
             renderResults(analysis, inputData.risk);
             
             // Save regenerated analysis to backend if using backend credits
-            const useBackend = useBackendCreditsCheckbox.checked;
             if (useBackend) {
                 try {
                     // Get prospectId from cached data or current profile
                     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                     if (tab && tab.url.includes('linkedin.com/in/')) {
                         // Try to get prospectId from backend by profile URL
-                        const currentUserId = await getUserId();
+                        const currentApiKey = await getApiKey();
                         const prospectResponse = await fetch(`${BACKEND_URL}/api/prospects`, {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
-                                'x-user-id': currentUserId
+                                'x-api-key': currentApiKey
                             },
                             body: JSON.stringify({ linkedinProfileUrl: tab.url })
                         });
@@ -2048,65 +2342,102 @@ Also generate complete sequences:
             alert(e.message);
             updateStatus("Error");
             log(`Regeneration error: ${e.message}`);
+        } finally {
+            // Re-enable button
+            regenerateBtn.disabled = false;
+            regenerateBtn.style.opacity = '1';
+            regenerateBtn.style.cursor = 'pointer';
+            regenerateBtn.textContent = originalText;
         }
     });
 
     // === Analysis Logic ===
     analyzeBtn.addEventListener('click', async () => {
-        const inputData = {
-            apiKey: apiKeyInput.value.trim(),
-            goal: userGoalInput.value.trim(),
-            icp: icpDefinitionInput.value.trim(),
-            offer: offerDetailsInput.value.trim(),
-            proof: proofPointsInput.value.trim(),
-            risk: riskLevelInput.value,
-            offerType: offerTypeInput.value
-        };
-
-        // Check if using backend credits or own API key
-        const useBackend = useBackendCreditsCheckbox.checked;
-        if (!useBackend && !inputData.apiKey) {
-            return updateStatus('Missing API Key');
-        }
-        if (!inputData.goal) return updateStatus('Missing Goal');
-
-        // Check credits if using backend
-        if (useBackend) {
-            const estimatedTokens = 5000; // Rough estimate for full analysis
-            const hasCredits = await hasEnoughCredits(estimatedTokens);
-            if (!hasCredits) {
-                const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
-                if (buyCredits) {
-                    showTab('tab-settings');
-                    buyCreditsBtn.click();
-                }
-                return updateStatus('Insufficient Credits');
-            }
-        }
-
-        const senderStructured = (await chrome.storage.local.get('sender_profile_structured')).sender_profile_structured;
-
-        if (!senderStructured) {
-            alert('Please capture your profile first in Settings tab.');
-            showTab('tab-settings');
-            return;
-        }
-
-        updateStatus("Connecting...");
+        // Disable button to prevent multiple clicks
+        analyzeBtn.disabled = true;
+        analyzeBtn.style.opacity = '0.6';
+        analyzeBtn.style.cursor = 'not-allowed';
+        const originalText = analyzeBtn.textContent;
+        analyzeBtn.textContent = 'Analyzing...';
         
-        // Check for cached analysis
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab && tab.url.includes('linkedin.com/')) {
-            const cached = await checkCachedAnalysis(tab.url);
-            if (cached) {
-                log("[Cache] Found cached analysis - user can use 'Regenerate Messages' button");
-                // Don't show regenerate button yet, wait until analysis completes
-            }
-        }
-
         try {
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (!tab || !tab.url.includes('linkedin.com/')) throw new Error('Go to LinkedIn Profile');
+            const inputData = {
+                apiKey: apiKeyInput.value.trim(),
+                goal: userGoalInput.value.trim(),
+                icp: icpDefinitionInput.value.trim(),
+                offer: offerDetailsInput.value.trim(),
+                proof: proofPointsInput.value.trim(),
+                risk: riskLevelInput.value,
+                offerType: offerTypeInput.value
+            };
+
+            // Check if using backend credits or own API key
+            const useBackend = useBackendCreditsCheckbox.checked;
+            if (!useBackend && !inputData.apiKey) {
+                analyzeBtn.disabled = false;
+                analyzeBtn.style.opacity = '1';
+                analyzeBtn.style.cursor = 'pointer';
+                analyzeBtn.textContent = originalText;
+                return updateStatus('Missing API Key');
+            }
+            if (!inputData.goal) {
+                analyzeBtn.disabled = false;
+                analyzeBtn.style.opacity = '1';
+                analyzeBtn.style.cursor = 'pointer';
+                analyzeBtn.textContent = originalText;
+                return updateStatus('Missing Goal');
+            }
+
+            const currentUserId = await getUserId();
+            // Check credits if using backend
+            if (useBackend) {
+                const estimatedTokens = 5000; // Rough estimate for full analysis
+                const hasCredits = await hasEnoughCredits(estimatedTokens);
+                if (!hasCredits) {
+                    analyzeBtn.disabled = false;
+                    analyzeBtn.style.opacity = '1';
+                    analyzeBtn.style.cursor = 'pointer';
+                    analyzeBtn.textContent = originalText;
+                    const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
+                    if (buyCredits) {
+                        showTab('tab-settings');
+                        buyCreditsBtn.click();
+                    }
+                    return updateStatus('Insufficient Credits');
+                }
+            }
+
+            const senderStructured = (await chrome.storage.local.get('sender_profile_structured')).sender_profile_structured;
+
+            if (!senderStructured) {
+                analyzeBtn.disabled = false;
+                analyzeBtn.style.opacity = '1';
+                analyzeBtn.style.cursor = 'pointer';
+                analyzeBtn.textContent = originalText;
+                alert('Please capture your profile first in Settings tab.');
+                showTab('tab-settings');
+                return;
+            }
+
+            updateStatus("Connecting...");
+            
+            // Check for cached analysis
+            let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tab && tab.url.includes('linkedin.com/')) {
+                const cached = await checkCachedAnalysis(tab.url);
+                if (cached) {
+                    log("[Cache] Found cached analysis - user can use 'Regenerate Messages' button");
+                    // Don't show regenerate button yet, wait until analysis completes
+                }
+            }
+            
+            if (!tab || !tab.url.includes('linkedin.com/')) {
+                analyzeBtn.disabled = false;
+                analyzeBtn.style.opacity = '1';
+                analyzeBtn.style.cursor = 'pointer';
+                analyzeBtn.textContent = originalText;
+                throw new Error('Go to LinkedIn Profile');
+            }
 
             if (!(await ensureContentScript(tab.id))) throw new Error("Please refresh page");
 
@@ -2189,7 +2520,6 @@ Also generate complete sequences:
 
             // Create prospect in database
             let prospectId = null;
-            const useBackend = useBackendCreditsCheckbox.checked;
             if (useBackend) {
                 try {
                     const currentUserId = await getUserId();
@@ -2201,12 +2531,12 @@ Also generate complete sequences:
                         location: null
                     };
                     log(`[Prospect] Creating prospect for URL: ${tab.url}`);
-                    log(`[Prospect] User ID: ${currentUserId}`);
+                    const currentApiKey = await getApiKey();
                     const createResponse = await fetch(`${BACKEND_URL}/api/prospects`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'x-user-id': currentUserId
+                            'x-api-key': currentApiKey
                         },
                         body: JSON.stringify(prospectData)
                     });
@@ -2239,7 +2569,8 @@ Also generate complete sequences:
                 activity, 
                 inputData.apiKey,
                 response.relatedProfiles,
-                prospectId
+                prospectId,
+                currentUserId
             );
             log("[Extract] Structured prospect: " + JSON.stringify(structuredProspect));
             log("[Extract] ✓ Structured prospect extracted: " + structuredProspect.name);
@@ -2263,7 +2594,8 @@ Also generate complete sequences:
                 postUrls,
                 tab.id,
                 inputData.apiKey,
-                prospectId
+                prospectId,
+                currentUserId
             );
             log("[PostSummary] Post analysis: " + (postSummary ? `Complete - ${postSummary.keyTopics?.length || 0} topics` : "Skipped"));
             log("[PostSummary] Post summary: " + JSON.stringify(postSummary));
@@ -2371,6 +2703,12 @@ Also generate complete sequences:
             alert(e.message);
             updateStatus("Error");
             log(`Analysis error: ${e.message}`);
+        } finally {
+            // Re-enable button
+            analyzeBtn.disabled = false;
+            analyzeBtn.style.opacity = '1';
+            analyzeBtn.style.cursor = 'pointer';
+            analyzeBtn.textContent = originalText;
         }
     });
 })

@@ -1,29 +1,136 @@
-require('dotenv').config();
+// Load environment variables FIRST - before any other code
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+
+// Debug: Log if .env is being loaded (only in development)
+if (process.env.NODE_ENV !== 'production') {
+    console.log('🔍 Environment check:');
+    console.log('  DB_HOST:', process.env.DB_HOST ? '✓ Set' : '✗ Missing');
+    console.log('  DB_USER:', process.env.DB_USER ? '✓ Set' : '✗ Missing');
+    console.log('  DB_NAME:', process.env.DB_NAME ? '✓ Set' : '✗ Missing');
+    console.log('  .env file path:', require('path').join(__dirname, '.env'));
+}
+
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
-// Use test/sandbox keys for Stripe (change to live keys in production)
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_test_51LKhEWSIyr7jGq28mBLChX4Q1xcDmffIvHcJXu5ePL6smTIkRUv9wl7hfVbRXnGDPMLmAWTJHcAldbIOVMB4OpgG00IqgNyH1P');
+const path = require('path');
+
+// Validate required environment variables
+const requiredEnvVars = [
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'OPENAI_API_KEY',
+    'DB_HOST',
+    'DB_USER',
+    //'DB_PASSWORD',
+    'DB_NAME',
+    'BACKEND_URL'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+    console.error('❌ Missing required environment variables:');
+    missingVars.forEach(varName => console.error(`   - ${varName}`));
+    console.error('\nPlease create a .env file in the backend directory with all required variables.');
+    console.error('Example .env file location:', path.join(__dirname, '.env'));
+    console.error('\nYou can copy .env.example to .env and fill in the values.');
+    
+    // Check if .env file exists
+    const fs = require('fs');
+    const envPath = path.join(__dirname, '.env');
+    if (!fs.existsSync(envPath)) {
+        console.error(`\n⚠️  .env file not found at: ${envPath}`);
+        console.error('   Creating a template .env file...');
+        // Don't exit in development - allow defaults
+        if (process.env.NODE_ENV === 'production') {
+            process.exit(1);
+        } else {
+            console.warn('   Continuing with defaults (development mode only)');
+        }
+    } else {
+        console.error(`\n⚠️  .env file exists at: ${envPath}`);
+        console.error('   But some required variables are missing or empty.');
+        if (process.env.NODE_ENV === 'production') {
+            process.exit(1);
+        }
+    }
+}
+
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const OpenAI = require('openai');
 const mysql = require('mysql2/promise');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Security: Rate limiting configuration
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000; // 1 minute
+const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100; // 100 requests per window
+
 // Middleware
-app.use(cors());
+// CORS configuration - restrict to extension origin if provided
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests) if API key is provided
+        if (!origin && process.env.ALLOW_NO_ORIGIN === 'true') {
+            return callback(null, true);
+        }
+        // Allow Chrome extension origins
+        if (origin && (origin.startsWith('chrome-extension://') || origin === process.env.FRONTEND_URL)) {
+            callback(null, true);
+        } else if (process.env.NODE_ENV === 'development') {
+            // In development, allow all origins
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
 
 // MySQL Database Connection Pool
-const pool = mysql.createPool({
+// Use defaults if env vars are not set (for development)
+const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT || 3306,
+    port: parseInt(process.env.DB_PORT) || 3306,
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'linkedin_sales_copilot',
     waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-});
+    connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT) || 10,
+    queueLimit: parseInt(process.env.DB_QUEUE_LIMIT) || 0
+};
+
+// Log database config (without password) for debugging
+if (process.env.NODE_ENV !== 'production') {
+    console.log('📊 Database Configuration:');
+    console.log('  Host:', dbConfig.host);
+    console.log('  Port:', dbConfig.port);
+    console.log('  User:', dbConfig.user);
+    console.log('  Database:', dbConfig.database);
+    console.log('  Password:', dbConfig.password ? '***' : '(empty)');
+}
+
+const pool = mysql.createPool(dbConfig);
+
+// Test database connection on startup
+pool.getConnection()
+    .then(connection => {
+        console.log('✓ Database connection successful');
+        connection.release();
+    })
+    .catch(err => {
+        console.error('✗ Database connection failed:', err.message);
+        console.error('  Please check your .env file and ensure:');
+        console.error('    - DB_HOST is set correctly');
+        console.error('    - DB_USER is set correctly');
+        console.error('    - DB_PASSWORD is set (can be empty for local MySQL)');
+        console.error('    - DB_NAME is set correctly');
+        console.error('    - MySQL server is running');
+    });
 
 // Credit configuration
 const CREDIT_CONFIG = {
@@ -34,33 +141,52 @@ const CREDIT_CONFIG = {
     }
 };
 
-// Pricing packages with USD and INR prices
-// Note: INR prices are approximate conversions, adjust based on current exchange rates
-const PRICING_PACKAGES = [
-    { 
-        id: 0, 
-        name: 'Starter', 
-        tokens: 100000, 
-        price_usd: 9.99,
-        price_inr: 799  // Approximate: $9.99 * 80 INR/USD
-    },
-    { 
-        id: 1, 
-        name: 'Professional', 
-        tokens: 500000, 
-        price_usd: 39.99,
-        price_inr: 3199  // Approximate: $39.99 * 80 INR/USD
-    },
-    { 
-        id: 2, 
-        name: 'Enterprise', 
-        tokens: 2000000, 
-        price_usd: 149.99,
-        price_inr: 11999  // Approximate: $149.99 * 80 INR/USD
+// Pricing packages - can be overridden via environment variables
+// Format: PRICING_PACKAGES_JSON (optional, if not provided, uses defaults below)
+let PRICING_PACKAGES;
+if (process.env.PRICING_PACKAGES_JSON) {
+    try {
+        PRICING_PACKAGES = JSON.parse(process.env.PRICING_PACKAGES_JSON);
+    } catch (e) {
+        console.warn('Invalid PRICING_PACKAGES_JSON, using defaults');
+        PRICING_PACKAGES = null;
     }
-];
+}
 
-// Initialize user with free tokens
+if (!PRICING_PACKAGES) {
+    PRICING_PACKAGES = [
+        { 
+            id: 0, 
+            name: process.env.PKG_0_NAME || 'Starter', 
+            tokens: parseInt(process.env.PKG_0_TOKENS) || 100000, 
+            price_usd: parseFloat(process.env.PKG_0_PRICE_USD) || 9.99,
+            price_inr: parseFloat(process.env.PKG_0_PRICE_INR) || 799
+        },
+        { 
+            id: 1, 
+            name: process.env.PKG_1_NAME || 'Professional', 
+            tokens: parseInt(process.env.PKG_1_TOKENS) || 500000, 
+            price_usd: parseFloat(process.env.PKG_1_PRICE_USD) || 39.99,
+            price_inr: parseFloat(process.env.PKG_1_PRICE_INR) || 3199
+        },
+        { 
+            id: 2, 
+            name: process.env.PKG_2_NAME || 'Enterprise', 
+            tokens: parseInt(process.env.PKG_2_TOKENS) || 2000000, 
+            price_usd: parseFloat(process.env.PKG_2_PRICE_USD) || 149.99,
+            price_inr: parseFloat(process.env.PKG_2_PRICE_INR) || 11999
+        }
+    ];
+}
+
+// Generate API key
+function generateApiKey() {
+    const prefix = 'lsc_'; // LinkedIn Sales Copilot prefix
+    const randomPart = crypto.randomBytes(32).toString('hex');
+    return `${prefix}${randomPart}`;
+}
+
+// Initialize user with free tokens and generate API key if needed
 async function initializeUser(userId, userData = {}) {
     try {
         const connection = await pool.getConnection();
@@ -72,15 +198,18 @@ async function initializeUser(userId, userData = {}) {
         );
         
         if (existing.length === 0) {
-            // Create new user with free tokens
+            // Generate API key for new user
+            const apiKey = generateApiKey();
+            // Create new user with free tokens and API key
             await connection.query(
-                'INSERT INTO users (user_id, balance, used, name, linkedin_profile_url) VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO users (user_id, balance, used, name, linkedin_profile_url, api_key, api_key_created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
                 [
                     userId, 
                     CREDIT_CONFIG.FREE_TOKENS, 
                     0,
                     userData.name || null,
-                    userData.linkedinProfileUrl || null
+                    userData.linkedinProfileUrl || null,
+                    apiKey
                 ]
             );
         } else if (userData.name || userData.linkedinProfileUrl) {
@@ -117,14 +246,139 @@ async function initializeUser(userId, userData = {}) {
     }
 }
 
+// Get or generate API key for user
+async function getOrGenerateApiKey(userId) {
+    try {
+        const connection = await pool.getConnection();
+        const [users] = await connection.query(
+            'SELECT api_key FROM users WHERE user_id = ?',
+            [userId]
+        );
+        
+        if (users.length === 0) {
+            connection.release();
+            throw new Error('User not found');
+        }
+        
+        let apiKey = users[0].api_key;
+        
+        // Generate API key if user doesn't have one
+        if (!apiKey) {
+            apiKey = generateApiKey();
+            await connection.query(
+                'UPDATE users SET api_key = ?, api_key_created_at = NOW() WHERE user_id = ?',
+                [apiKey, userId]
+            );
+        }
+        
+        connection.release();
+        return apiKey;
+    } catch (error) {
+        console.error('Error getting API key:', error);
+        throw error;
+    }
+}
+
+// Validate API key middleware
+async function validateApiKey(req, res, next) {
+    try {
+        const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+        
+        if (!apiKey) {
+            return res.status(401).json({ error: 'API key is required. Please provide x-api-key header or Authorization Bearer token.' });
+        }
+        
+        const connection = await pool.getConnection();
+        const [users] = await connection.query(
+            'SELECT user_id, api_key FROM users WHERE api_key = ?',
+            [apiKey]
+        );
+        
+        if (users.length === 0) {
+            connection.release();
+            return res.status(401).json({ error: 'Invalid API key' });
+        }
+        
+        // Update last API call timestamp
+        await connection.query(
+            'UPDATE users SET last_api_call_at = NOW() WHERE user_id = ?',
+            [users[0].user_id]
+        );
+        
+        // Attach user info to request
+        req.userId = users[0].user_id;
+        req.apiKey = apiKey;
+        
+        connection.release();
+        next();
+    } catch (error) {
+        console.error('Error validating API key:', error);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+// Rate limiting middleware
+async function rateLimitMiddleware(req, res, next) {
+    try {
+        const apiKey = req.apiKey;
+        const endpoint = req.path;
+        const now = new Date();
+        const windowStart = new Date(now.getTime() - RATE_LIMIT_WINDOW_MS);
+        
+        const connection = await pool.getConnection();
+        
+        // Clean up old rate limit records
+        await connection.query(
+            'DELETE FROM api_rate_limits WHERE window_start < ?',
+            [windowStart]
+        );
+        
+        // Get current rate limit for this API key and endpoint
+        const [limits] = await connection.query(
+            'SELECT request_count FROM api_rate_limits WHERE api_key = ? AND endpoint = ? AND window_start >= ?',
+            [apiKey, endpoint, windowStart]
+        );
+        
+        if (limits.length > 0) {
+            const currentCount = limits[0].request_count;
+            if (currentCount >= RATE_LIMIT_MAX_REQUESTS) {
+                connection.release();
+                return res.status(429).json({ 
+                    error: 'Rate limit exceeded',
+                    message: `Too many requests. Maximum ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000} seconds.`,
+                    retryAfter: Math.ceil((RATE_LIMIT_WINDOW_MS - (now.getTime() - new Date(limits[0].window_start).getTime())) / 1000)
+                });
+            }
+            
+            // Increment request count
+            await connection.query(
+                'UPDATE api_rate_limits SET request_count = request_count + 1 WHERE api_key = ? AND endpoint = ? AND window_start >= ?',
+                [apiKey, endpoint, windowStart]
+            );
+        } else {
+            // Create new rate limit record
+            await connection.query(
+                'INSERT INTO api_rate_limits (api_key, endpoint, request_count, window_start) VALUES (?, ?, 1, ?)',
+                [apiKey, endpoint, now]
+            );
+        }
+        
+        connection.release();
+        next();
+    } catch (error) {
+        console.error('Error in rate limiting:', error);
+        // Don't block request on rate limit error, just log it
+        next();
+    }
+}
+
 // Stripe webhook route must use raw body - define BEFORE json parser
 app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
 
     try {
-        // Use test webhook secret for sandbox mode (change to production secret in production)
-        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || 'whsec_pMPFucMifGYVmyOcuKZCiaKQph3Of3i2');
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (err) {
         console.error('Webhook signature verification failed:', err.message);
         return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -408,10 +662,36 @@ function costToTokens(cost) {
     return Math.floor((cost / avgRate) * 1000000);
 }
 
-// Get user credits
-app.get('/api/credits', async (req, res) => {
+// Public endpoint to get or generate API key (requires user-id for initial setup)
+app.post('/api/auth/generate-key', async (req, res) => {
     try {
-        const userId = req.headers['x-user-id'] || uuidv4();
+        const userId = req.headers['x-user-id'] || req.body.userId || uuidv4();
+        
+        if (!userId) {
+            return res.status(400).json({ error: 'User ID is required' });
+        }
+        
+        // Initialize user if needed
+        await initializeUser(userId);
+        
+        // Get or generate API key
+        const apiKey = await getOrGenerateApiKey(userId);
+        
+        res.json({ 
+            success: true,
+            apiKey: apiKey,
+            message: 'API key generated successfully. Store this securely - it will not be shown again.'
+        });
+    } catch (error) {
+        console.error('Error generating API key:', error);
+        res.status(500).json({ error: 'Failed to generate API key' });
+    }
+});
+
+// Get user credits (protected)
+app.get('/api/credits', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
         const user = await initializeUser(userId);
         
         res.json({
@@ -427,18 +707,15 @@ app.get('/api/credits', async (req, res) => {
     }
 });
 
-// Get pricing packages
+// Get pricing packages (public endpoint, but rate limited)
 app.get('/api/packages', (req, res) => {
     res.json({ packages: PRICING_PACKAGES });
 });
 
-// Update user profile
-app.post('/api/user/profile', async (req, res) => {
+// Update user profile (protected)
+app.post('/api/user/profile', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID required' });
-        }
+        const userId = req.userId;
         
         const { name, linkedinProfileUrl } = req.body;
         await initializeUser(userId, { name, linkedinProfileUrl });
@@ -450,13 +727,10 @@ app.post('/api/user/profile', async (req, res) => {
     }
 });
 
-// Create prospect
-app.post('/api/prospects', async (req, res) => {
+// Create prospect (protected)
+app.post('/api/prospects', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID required' });
-        }
+        const userId = req.userId;
         
         const prospectData = req.body;
         const prospectId = await createOrGetProspect(userId, prospectData);
@@ -468,8 +742,8 @@ app.post('/api/prospects', async (req, res) => {
     }
 });
 
-// Update prospect status
-app.put('/api/prospects/:prospectId/status', async (req, res) => {
+// Update prospect status (protected)
+app.put('/api/prospects/:prospectId/status', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
         const { prospectId } = req.params;
         const { status } = req.body;
@@ -481,13 +755,10 @@ app.put('/api/prospects/:prospectId/status', async (req, res) => {
     }
 });
 
-// Save analysis results
-app.post('/api/analyses', async (req, res) => {
+// Save analysis results (protected)
+app.post('/api/analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID required' });
-        }
+        const userId = req.userId;
         
         const {
             prospectId,
@@ -540,13 +811,10 @@ app.post('/api/analyses', async (req, res) => {
     }
 });
 
-// Get analyses for a user
-app.get('/api/analyses', async (req, res) => {
+// Get analyses for a user (protected)
+app.get('/api/analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
-        const userId = req.headers['x-user-id'];
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID required' });
-        }
+        const userId = req.userId;
         
         const { prospectId, limit = 50, offset = 0 } = req.query;
         
@@ -583,19 +851,14 @@ app.get('/api/analyses', async (req, res) => {
     }
 });
 
-// OpenAI Proxy - handles GPT calls with credit tracking
-app.post('/api/openai-proxy', async (req, res) => {
+// OpenAI Proxy - handles GPT calls with credit tracking (protected)
+app.post('/api/openai-proxy', validateApiKey, rateLimitMiddleware, async (req, res) => {
     const connection = await pool.getConnection();
     
     try {
         await connection.beginTransaction();
         
-        const userId = req.headers['x-user-id'];
-        if (!userId) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ error: 'User ID required' });
-        }
+        const userId = req.userId;
 
         const user = await initializeUser(userId);
         
@@ -727,10 +990,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
         const currencySymbol = currency === 'inr' ? '₹' : '$';
 
         // Use backend URL for success/cancel redirects (Chrome extension URLs don't work for Stripe redirects)
-        const backendUrl = process.env.BACKEND_URL || req.headers.origin || 'http://localhost:3000';
+        const backendUrl = process.env.BACKEND_URL;
         // Remove chrome-extension:// protocol if present
         const baseUrl = backendUrl.startsWith('chrome-extension://') 
-            ? (process.env.BACKEND_URL || 'http://localhost:3000')
+            ? process.env.BACKEND_URL
             : backendUrl;
         
         const session = await stripe.checkout.sessions.create({

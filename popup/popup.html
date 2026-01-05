@@ -187,54 +187,131 @@
 
             <!-- TAB 3: SETTINGS -->
             <div id="tab-settings" class="view hidden">
-                <section class="settings-group">
-                    <h3>Payment Mode</h3>
-                    <label>
-                        <input type="checkbox" id="useBackendCredits" />
-                        Use Backend Credits (instead of your own API key)
-                    </label>
-                    <small>When enabled, uses credit system. When disabled, uses your own OpenAI API key.</small>
-                </section>
-
-                <section class="settings-group" id="creditsSection">
-                    <h3>Credits</h3>
-                    <div class="credits-display">
-                        <div class="credits-info">
-                            <span>Remaining:</span>
-                            <span id="creditsDisplay" class="credits-amount">--</span>
-                        </div>
-                        <button id="buyCreditsBtn" class="secondary-btn">Buy Credits</button>
+                <!-- Billing & Credits Section -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-icon">💳</span>
+                        <h3>Billing & Credits</h3>
                     </div>
-                </section>
+                    <div class="settings-card-body">
+                        <div class="settings-item">
+                            <div class="settings-item-header">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="useBackendCredits" />
+                                    <span class="slider round"></span>
+                                </label>
+                                <div class="settings-item-label">
+                                    <strong>Use Backend Credits</strong>
+                                    <small>Enable to use our credit system instead of your own API key</small>
+                                </div>
+                            </div>
+                        </div>
 
-                <section class="settings-group" id="apiKeySection">
-                    <h3>API Configuration</h3>
-                    <label>OpenAI API Key</label>
-                    <input type="password" id="apiKey" placeholder="sk-..." />
-                    <small>Stored locally. Required when not using backend credits.</small>
-                </section>
+                        <div class="settings-divider"></div>
 
-                <section class="settings-group">
-                    <h3>Sender Profile</h3>
-                    <p>Capture your profile to enable "Shared Context" matching.</p>
-                    <button id="captureProfileBtn" class="secondary-btn">Capture My Profile</button>
-                    <div id="senderProfileStatus" class="status-pill">Not cached</div>
-                    <div id="senderPremiumStatus" class="status-pill" style="margin-top: 8px; display: none;"></div>
+                        <div class="settings-item" id="creditsSection">
+                            <div class="credits-display-modern">
+                                <div class="credits-header">
+                                    <span class="credits-label">Available Credits</span>
+                                    <span id="creditsDisplay" class="credits-amount-large">--</span>
+                                </div>
+                                <button id="buyCreditsBtn" class="primary-btn">Buy More Credits</button>
+                            </div>
+                        </div>
 
-                    <!-- New: Profile Preview -->
-                    <details class="profile-preview">
-                        <summary>View Cached Data</summary>
-                        <pre id="cachedProfilePreview">No data.</pre>
-                    </details>
-                </section>
+                        <div class="settings-item hidden" id="apiKeySection">
+                            <label class="settings-label">OpenAI API Key</label>
+                            <input type="password" id="apiKey" placeholder="sk-..." class="settings-input" />
+                            <small class="settings-hint">Stored locally. Required when not using backend credits.</small>
+                        </div>
+                    </div>
+                </div>
 
-                <section class="settings-group">
-                    <!-- Debug Logs -->
-                    <details>
-                        <summary>Debug Logs</summary>
-                        <div id="debugLog" class="log-box"></div>
-                    </details>
-                </section>
+                <!-- Profile Section -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-icon">👤</span>
+                        <h3>Your Profile</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-item">
+                            <p class="settings-description">Capture your LinkedIn profile to enable "Shared Context" matching with prospects.</p>
+                            <div class="settings-status-indicator" id="settingsStatusIndicator"></div>
+                            <button id="captureProfileBtn" class="primary-btn">Capture My Profile</button>
+                        </div>
+                        
+                        <div class="settings-divider"></div>
+
+                        <div class="settings-item">
+                            <div class="status-row">
+                                <div id="senderProfileStatus" class="status-pill">Not cached</div>
+                                <div id="senderPremiumStatus" class="status-pill hidden"></div>
+                            </div>
+                        </div>
+
+                        <div class="settings-item">
+                            <details class="settings-details">
+                                <summary class="settings-summary">View Cached Profile Data</summary>
+                                <pre id="cachedProfilePreview" class="settings-code">No data.</pre>
+                            </details>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Support Section -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-icon">💬</span>
+                        <h3>Support & Feedback</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-item">
+                            <p class="settings-description">Have questions, issues, or suggestions? We'd love to hear from you!</p>
+                            <div class="support-contact-modern">
+                                <div class="contact-item-modern">
+                                    <span class="contact-icon">📧</span>
+                                    <div class="contact-details">
+                                        <span class="contact-label-modern">Email Support</span>
+                                        <div class="contact-value-modern">
+                                            <a href="mailto:issues@gmail.com" class="contact-link-modern" id="supportEmail">issues@gmail.com</a>
+                                            <button class="copy-email-btn-modern" title="Copy email address">📋</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Help & Documentation Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-icon">📚</span>
+                        <h3>Help & Documentation</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-item">
+                            <p class="settings-description">Learn how to use all features, best practices, and troubleshooting tips.</p>
+                            <button id="openDocumentationBtn" class="primary-btn">Open Documentation</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Advanced Section -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-icon">⚙️</span>
+                        <h3>Advanced</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-item">
+                            <details class="settings-details">
+                                <summary class="settings-summary">Debug Logs</summary>
+                                <div id="debugLog" class="log-box"></div>
+                            </details>
+                        </div>
+                    </div>
+                </div>
             </div>
         </main>
     </div>
