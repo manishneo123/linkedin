@@ -188,10 +188,30 @@
             <!-- TAB 3: SETTINGS -->
             <div id="tab-settings" class="view hidden">
                 <section class="settings-group">
+                    <h3>Payment Mode</h3>
+                    <label>
+                        <input type="checkbox" id="useBackendCredits" />
+                        Use Backend Credits (instead of your own API key)
+                    </label>
+                    <small>When enabled, uses credit system. When disabled, uses your own OpenAI API key.</small>
+                </section>
+
+                <section class="settings-group" id="creditsSection">
+                    <h3>Credits</h3>
+                    <div class="credits-display">
+                        <div class="credits-info">
+                            <span>Remaining:</span>
+                            <span id="creditsDisplay" class="credits-amount">--</span>
+                        </div>
+                        <button id="buyCreditsBtn" class="secondary-btn">Buy Credits</button>
+                    </div>
+                </section>
+
+                <section class="settings-group" id="apiKeySection">
                     <h3>API Configuration</h3>
                     <label>OpenAI API Key</label>
                     <input type="password" id="apiKey" placeholder="sk-..." />
-                    <small>Stored locally.</small>
+                    <small>Stored locally. Required when not using backend credits.</small>
                 </section>
 
                 <section class="settings-group">
@@ -199,6 +219,7 @@
                     <p>Capture your profile to enable "Shared Context" matching.</p>
                     <button id="captureProfileBtn" class="secondary-btn">Capture My Profile</button>
                     <div id="senderProfileStatus" class="status-pill">Not cached</div>
+                    <div id="senderPremiumStatus" class="status-pill" style="margin-top: 8px; display: none;"></div>
 
                     <!-- New: Profile Preview -->
                     <details class="profile-preview">
@@ -217,6 +238,25 @@
             </div>
         </main>
     </div>
+
+    <!-- Payment Modal -->
+    <div id="paymentModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Buy Credits</h2>
+                <button id="closePaymentModal" class="close-btn">&times;</button>
+            </div>
+            <div class="currency-selector">
+                <label>Currency:</label>
+                <select id="currencySelect">
+                    <option value="usd">USD ($)</option>
+                    <option value="inr">INR (₹)</option>
+                </select>
+            </div>
+            <div id="pricingCards" class="pricing-cards"></div>
+        </div>
+    </div>
+
     <script src="popup.js"></script>
 </body>
 

@@ -27,12 +27,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const relatedProfiles = extractRelatedProfiles();
             console.log('[ContentScript] ✓ Related profiles:', relatedProfiles.length, 'found');
 
+            // Detect premium subscription
+            const isPremium = detectPremiumSubscription();
+            console.log('[ContentScript] ✓ Premium status:', isPremium);
+
             sendResponse({
                 success: true,
                 data: profileText,
                 activity: activity,
                 company: companyInfo,
-                relatedProfiles: relatedProfiles
+                relatedProfiles: relatedProfiles,
+                isPremium: isPremium
             });
         } catch (e) {
             console.error('[ContentScript] ✗ Error during scraping:', e);
@@ -534,4 +539,62 @@ async function loadRecentActivityPage() {
 
     console.log(`[RecentActivity] ✓ Extracted ${activity.posts.length} posts from recent activity page`);
     return activity;
+}
+
+/**
+ * Detect if the user has LinkedIn Premium subscription
+ * Checks for premium badges, indicators, or premium-specific UI elements
+ */
+function detectPremiumSubscription() {
+    try {
+        // Method 1: Check for premium badge/indicator in profile header
+        const premiumBadge = document.querySelector('[data-test-id="premium-badge"]') ||
+            document.querySelector('.premium-badge') ||
+            document.querySelector('[aria-label*="Premium"]') ||
+            document.querySelector('[aria-label*="premium"]');
+        
+        if (premiumBadge) {
+            console.log('[Premium] Found premium badge');
+            return true;
+        }
+
+        // Method 2: Check for premium icon in navigation or profile
+        const premiumIcon = document.querySelector('icon-premium') ||
+            document.querySelector('[data-test-icon="premium"]') ||
+            document.querySelector('.premium-icon');
+        
+        if (premiumIcon) {
+            console.log('[Premium] Found premium icon');
+            return true;
+        }
+
+        // Method 3: Check for premium text in profile
+        const premiumText = document.body.innerText.match(/premium/i);
+        if (premiumText) {
+            // Check if it's actually about the user's subscription, not just mentioning premium
+            const profileSection = document.querySelector('main') || document.body;
+            const profileText = profileSection.innerText || '';
+            // Look for patterns like "Premium Member", "LinkedIn Premium", etc.
+            if (profileText.match(/(?:linkedin\s+)?premium\s+(?:member|subscription|account)/i)) {
+                console.log('[Premium] Found premium text indicator');
+                return true;
+            }
+        }
+
+        // Method 4: Check for premium badge in the top navigation
+        const navPremium = document.querySelector('nav [data-test-id*="premium"]') ||
+            document.querySelector('nav [aria-label*="Premium"]');
+        
+        if (navPremium) {
+            console.log('[Premium] Found premium in navigation');
+            return true;
+        }
+
+        // Default to false if no premium indicators found
+        console.log('[Premium] No premium indicators found, assuming free account');
+        return false;
+    } catch (e) {
+        console.error('[Premium] Error detecting premium status:', e);
+        return false; // Default to false on error
+    }
 }

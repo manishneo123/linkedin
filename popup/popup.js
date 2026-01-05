@@ -12,6 +12,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const analyzeBtn = document.getElementById('analyzeBtn');
     const regenerateBtn = document.getElementById('regenerateBtn');
     const captureProfileBtn = document.getElementById('captureProfileBtn');
+    const buyCreditsBtn = document.getElementById('buyCreditsBtn');
+    const creditsDisplay = document.getElementById('creditsDisplay');
+    const paymentModal = document.getElementById('paymentModal');
+    const closePaymentModal = document.getElementById('closePaymentModal');
+    const pricingCards = document.getElementById('pricingCards');
+    const currencySelect = document.getElementById('currencySelect');
+    const useBackendCreditsCheckbox = document.getElementById('useBackendCredits');
+    const creditsSection = document.getElementById('creditsSection');
+    const apiKeySection = document.getElementById('apiKeySection');
 
     // Status
     const statusBadge = document.getElementById('statusBadge');
@@ -81,6 +90,336 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     log("Extension loaded. Initializing...");
 
+    // === Backend Configuration ===
+    const BACKEND_URL = 'http://localhost:3000'; // Change to your production URL
+    let userId = null;
+
+    // Get or create user ID
+    async function getUserId() {
+        if (userId) return userId;
+        const stored = await chrome.storage.local.get('user_id');
+        if (stored.user_id) {
+            userId = stored.user_id;
+        } else {
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            await chrome.storage.local.set({ user_id: userId });
+        }
+        return userId;
+    }
+
+    // === Credit Management System ===
+    const CREDIT_CONFIG = {
+        FREE_TOKENS: 10000,
+        TOKEN_COST_PER_1M: {
+            'gpt-4o-mini': { input: 0.15, output: 0.60 }
+        }
+    };
+
+    /**
+     * Count tokens in text (approximate)
+     */
+    function countTokens(text) {
+        if (!text) return 0;
+        // Rough approximation: 1 token ≈ 4 characters for English text
+        return Math.ceil(text.length / 4);
+    }
+
+    /**
+     * Get current credits balance
+     */
+    async function getCredits() {
+        try {
+            const currentUserId = await getUserId();
+            const response = await fetch(`${BACKEND_URL}/api/credits`, {
+                headers: {
+                    'x-user-id': currentUserId
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                return {
+                    balance: data.balance || 0,
+                    used: data.used || 0,
+                    remaining: data.remaining || 0
+                };
+            }
+        } catch (e) {
+            log(`[Credits] Error fetching credits: ${e.message}`);
+        }
+        
+        // Fallback to local storage
+        const stored = await chrome.storage.local.get(['credits_balance', 'credits_used']);
+        const balance = stored.credits_balance !== undefined ? stored.credits_balance : CREDIT_CONFIG.FREE_TOKENS;
+        const used = stored.credits_used || 0;
+        return { balance, used, remaining: balance - used };
+    }
+
+    /**
+     * Update credits display
+     */
+    async function updateCreditsDisplay() {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        if (!useBackend) {
+            creditsSection.style.display = 'none';
+            return;
+        }
+        
+        creditsSection.style.display = 'block';
+        const { remaining, used, balance } = await getCredits();
+        const remainingFormatted = remaining.toLocaleString();
+        
+        if (creditsDisplay) {
+            creditsDisplay.textContent = `${remainingFormatted} tokens`;
+            if (remaining <= 0) {
+                creditsDisplay.style.color = '#f44336';
+                creditsDisplay.textContent += ' (Insufficient)';
+            } else if (remaining < 1000) {
+                creditsDisplay.style.color = '#ffc107';
+            } else {
+                creditsDisplay.style.color = '#4caf50';
+            }
+        }
+    }
+
+    /**
+     * Check if user has enough credits
+     */
+    async function hasEnoughCredits(estimatedTokens) {
+        const { remaining } = await getCredits();
+        return remaining >= estimatedTokens;
+    }
+
+    /**
+     * Wrapper for GPT API calls with credit tracking
+     */
+    async function callGPTWithTracking(url, options, model = 'gpt-4o-mini', userApiKey = null, processType = 'gpt_api_call', processDescription = null, prospectId = null) {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        
+        // If user has their own API key and backend is disabled, use it directly
+        if (!useBackend && userApiKey && userApiKey.trim()) {
+            log("[Credits] Using user's own API key - no credits charged");
+            return await fetch(url, {
+                ...options,
+                headers: {
+                    ...options.headers,
+                    'Authorization': `Bearer ${userApiKey}`
+                }
+            });
+        }
+
+        // Credits mode - use backend proxy
+        if (!useBackend) {
+            throw new Error('Backend credits disabled and no API key provided');
+        }
+
+        const requestBody = JSON.parse(options.body);
+        const promptText = requestBody.messages?.map(m => m.content).join(' ') || '';
+        const estimatedTokens = countTokens(promptText) + 500; // Add buffer for response
+        
+        const hasCredits = await hasEnoughCredits(estimatedTokens);
+        if (!hasCredits) {
+            const error = new Error('INSUFFICIENT_CREDITS');
+            error.code = 'INSUFFICIENT_CREDITS';
+            throw error;
+        }
+
+        // Call backend proxy
+        const currentUserId = await getUserId();
+        const response = await fetch(`${BACKEND_URL}/api/openai-proxy`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-user-id': currentUserId
+            },
+            body: JSON.stringify({
+                request: requestBody,
+                userId: currentUserId,
+                processType: processType,
+                processDescription: processDescription || `${processType} using ${model}`,
+                prospectId: prospectId
+            })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            if (errorData.error === 'INSUFFICIENT_CREDITS') {
+                const error = new Error('INSUFFICIENT_CREDITS');
+                error.code = 'INSUFFICIENT_CREDITS';
+                error.remaining = errorData.remaining;
+                throw error;
+            }
+            throw new Error(errorData.error || 'API Error');
+        }
+
+        const data = await response.json();
+        
+        // Update credits display
+        await updateCreditsDisplay();
+        
+        // Return response in OpenAI format
+        return {
+            ok: true,
+            json: async () => data.response
+        };
+    }
+
+    // Initialize credits display
+    updateCreditsDisplay();
+    
+    // Refresh credits display periodically
+    setInterval(updateCreditsDisplay, 30000); // Every 30 seconds
+
+    // === Payment Modal Handlers ===
+    let currentCurrency = 'usd';
+    
+    // Function to render pricing cards based on selected currency
+    function renderPricingCards(packages, currency) {
+        pricingCards.innerHTML = '';
+        packages.forEach((pkg, index) => {
+            const price = currency === 'inr' ? (pkg.price_inr || 0) : (pkg.price_usd || 0);
+            const symbol = currency === 'inr' ? '₹' : '$';
+            
+            const card = document.createElement('div');
+            card.className = 'pricing-card';
+            card.innerHTML = `
+                <h3>${pkg.name}</h3>
+                <div class="pricing-amount">${symbol}${price.toLocaleString()}</div>
+                <div class="pricing-tokens">${pkg.tokens.toLocaleString()} tokens</div>
+                <button class="select-plan-btn" data-package-id="${index}">Select Plan</button>
+            `;
+            pricingCards.appendChild(card);
+        });
+    }
+    
+    buyCreditsBtn.addEventListener('click', async () => {
+        try {
+            // Load packages
+            const response = await fetch(`${BACKEND_URL}/api/packages`);
+            if (!response.ok) throw new Error('Failed to load packages');
+            
+            const data = await response.json();
+            const packages = data.packages || [];
+            
+            // Get saved currency preference or default to USD
+            const stored = await chrome.storage.local.get('preferred_currency');
+            currentCurrency = stored.preferred_currency || 'usd';
+            currencySelect.value = currentCurrency;
+            
+            // Render pricing cards with current currency
+            renderPricingCards(packages, currentCurrency);
+            
+            paymentModal.classList.remove('hidden');
+        } catch (e) {
+            alert('Failed to load packages: ' + e.message);
+        }
+    });
+    
+    // Handle currency change
+    currencySelect.addEventListener('change', async (e) => {
+        currentCurrency = e.target.value;
+        await chrome.storage.local.set({ preferred_currency: currentCurrency });
+        
+        // Reload packages to re-render with new currency
+        try {
+            const response = await fetch(`${BACKEND_URL}/api/packages`);
+            if (response.ok) {
+                const data = await response.json();
+                renderPricingCards(data.packages || [], currentCurrency);
+            }
+        } catch (err) {
+            console.error('Error reloading packages:', err);
+        }
+    });
+
+    closePaymentModal.addEventListener('click', () => {
+        paymentModal.classList.add('hidden');
+    });
+
+    // Handle pricing card selection
+    pricingCards.addEventListener('click', async (e) => {
+        if (e.target.classList.contains('select-plan-btn')) {
+            const packageId = parseInt(e.target.dataset.packageId);
+            
+            try {
+                const currentUserId = await getUserId();
+                const response = await fetch(`${BACKEND_URL}/api/create-checkout-session`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        packageId: packageId,
+                        userId: currentUserId,
+                        currency: currentCurrency
+                    })
+                });
+                
+                if (!response.ok) throw new Error('Failed to create checkout session');
+                
+                const data = await response.json();
+                
+                // Open Stripe checkout in a new window
+                const checkoutWindow = window.open(data.url, '_blank', 'width=600,height=700');
+                
+                // Listen for payment success message from success page
+                const messageHandler = async (event) => {
+                    if (event.data && event.data.type === 'PAYMENT_SUCCESS') {
+                        window.removeEventListener('message', messageHandler);
+                        // Wait a moment for webhook to process
+                        setTimeout(async () => {
+                            await updateCreditsDisplay();
+                            paymentModal.classList.add('hidden');
+                            alert('Payment successful! Credits have been added to your account.');
+                            log('[Payment] Credits updated after payment');
+                        }, 2000);
+                    }
+                };
+                window.addEventListener('message', messageHandler);
+                
+                // Also poll for window close (fallback method)
+                const checkPaymentStatus = setInterval(() => {
+                    try {
+                        if (checkoutWindow.closed) {
+                            clearInterval(checkPaymentStatus);
+                            // Wait for webhook to process
+                            setTimeout(async () => {
+                                await updateCreditsDisplay();
+                                log('[Payment] Window closed, credits refreshed');
+                            }, 3000);
+                        }
+                    } catch (e) {
+                        // Window might be from different origin, ignore errors
+                    }
+                }, 1000);
+                
+                // Cleanup interval after 10 minutes
+                setTimeout(() => {
+                    clearInterval(checkPaymentStatus);
+                    window.removeEventListener('message', messageHandler);
+                }, 600000);
+            } catch (e) {
+                alert('Failed to start checkout: ' + e.message);
+            }
+        }
+    });
+
+    // Toggle backend credits mode
+    useBackendCreditsCheckbox.addEventListener('change', async () => {
+        const useBackend = useBackendCreditsCheckbox.checked;
+        await chrome.storage.local.set({ use_backend_credits: useBackend });
+        
+        if (useBackend) {
+            creditsSection.style.display = 'block';
+            apiKeySection.style.display = 'none';
+        } else {
+            creditsSection.style.display = 'none';
+            apiKeySection.style.display = 'block';
+        }
+        
+        await updateCreditsDisplay();
+    });
+
     // === Check for cached analysis on load ===
     async function checkAndShowRegenerateButton() {
         try {
@@ -106,7 +445,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const stored = await chrome.storage.local.get([
         'openai_api_key', 'user_goal', 'icp_definition',
         'offer_details', 'proof_points', 'risk_level', 'offer_type',
-        'sender_profile_cache', 'sender_profile_structured', 'sender_profile_date'
+        'sender_profile_cache', 'sender_profile_structured', 'sender_profile_date',
+        'use_backend_credits'
     ]);
 
     if (stored.openai_api_key) apiKeyInput.value = stored.openai_api_key;
@@ -116,6 +456,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (stored.proof_points) proofPointsInput.value = stored.proof_points;
     if (stored.risk_level) riskLevelInput.value = stored.risk_level;
     if (stored.offer_type) offerTypeInput.value = stored.offer_type;
+    
+    // Load backend credits setting
+    if (stored.use_backend_credits !== undefined) {
+        useBackendCreditsCheckbox.checked = stored.use_backend_credits;
+        if (stored.use_backend_credits) {
+            creditsSection.style.display = 'block';
+            apiKeySection.style.display = 'none';
+        } else {
+            creditsSection.style.display = 'none';
+            apiKeySection.style.display = 'block';
+        }
+    }
+    await updateCreditsDisplay();
 
     if (stored.sender_profile_cache) {
         senderProfileStatus.textContent = `Cached: ${stored.sender_profile_date || 'Unknown'}`;
@@ -129,15 +482,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (s.currentPosition) {
                 preview += `\n\nCurrent: ${s.currentPosition.title} at ${s.currentPosition.company}`;
             }
-            if (s.education.length > 0) {
+            if (s.education && s.education.length > 0) {
                 preview += `\n\nEducation: ${s.education[0].school}`;
                 if (s.education.length > 1) preview += ` (+${s.education.length - 1} more)`;
+            }
+            // Add premium status to preview if available
+            if (s.isPremium !== undefined || stored.sender_is_premium !== undefined) {
+                const premiumStatus = s.isPremium !== undefined ? s.isPremium : stored.sender_is_premium;
+                preview += `\n\nPremium Account: ${premiumStatus ? 'Yes (400 char limit)' : 'No (200 char limit)'}`;
             }
             cachedProfilePreview.textContent = preview;
         } else {
             // Fallback to text preview for old cached data
             cachedProfilePreview.textContent = stored.sender_profile_cache.substring(0, 500) + '...';
         }
+    }
+
+    // Display premium status if available
+    if (stored.sender_is_premium !== undefined) {
+        const premiumStatus = stored.sender_is_premium ? 'Premium (400 char limit)' : 'Free (200 char limit)';
+        log(`Sender premium status: ${premiumStatus}`);
     }
 
     log("Settings loaded.");
@@ -234,7 +598,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const now = new Date().toLocaleDateString();
             const data = response.data;
 
-            // Use GPT to extract structured data
+            // Use GPT to extract structured data (including premium status)
             updateStatus("Analyzing with GPT...");
             log("Calling GPT to extract structured data...");
             const structured = await extractProfileWithGPT(data, apiKeyInput.value);
@@ -243,11 +607,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             log(`Structured name: "${structured?.name || 'EMPTY'}"`);
             log(`Structured headline: "${structured?.headline || 'EMPTY'}"`);
             log(`Exp count: ${structured?.experience?.length || 0}, Edu count: ${structured?.education?.length || 0} `);
+            
+            // Get premium status from GPT extraction (fallback to content script detection if not available)
+            const isPremium = structured?.isPremium !== undefined ? structured.isPremium : (response.isPremium || false);
+            log(`Premium status (GPT detected): ${isPremium ? 'Yes (400 char limit)' : 'No (200 char limit)'}`);
 
             await chrome.storage.local.set({
                 sender_profile_cache: data.substring(0, 20000),
                 sender_profile_structured: structured,
-                sender_profile_date: now
+                sender_profile_date: now,
+                sender_is_premium: isPremium
             });
 
             log("Data saved to chrome.storage.local");
@@ -255,15 +624,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             senderProfileStatus.textContent = `Cached: ${now} `;
             senderProfileStatus.style.color = '#10b981';
 
+            // Display premium status
+            const premiumStatusEl = document.getElementById('senderPremiumStatus');
+            if (premiumStatusEl) {
+                if (isPremium) {
+                    premiumStatusEl.textContent = '✓ Premium Account (400 char limit)';
+                    premiumStatusEl.style.color = '#10b981';
+                    premiumStatusEl.style.display = 'block';
+                } else {
+                    premiumStatusEl.textContent = 'Free Account (200 char limit)';
+                    premiumStatusEl.style.color = '#6b7280';
+                    premiumStatusEl.style.display = 'block';
+                }
+            }
+
             // Create a better preview from structured data
             let preview = `${structured.name} `;
             if (structured.headline) preview += `\n${structured.headline} `;
             if (structured.currentPosition) {
                 preview += `\n\nCurrent: ${structured.currentPosition.title} at ${structured.currentPosition.company} `;
             }
-            if (structured.education.length > 0) {
+            if (structured.education && structured.education.length > 0) {
                 preview += `\n\nEducation: ${structured.education[0].school} `;
                 if (structured.education.length > 1) preview += ` (+${structured.education.length - 1} more)`;
+            }
+            // Add premium status to preview
+            if (structured.isPremium !== undefined) {
+                preview += `\n\nPremium Account: ${structured.isPremium ? 'Yes (400 char limit)' : 'No (200 char limit)'}`;
             }
 
             cachedProfilePreview.textContent = preview;
@@ -293,6 +680,7 @@ Extract and return ONLY a JSON object with this exact structure:
                 "headline": "Professional Title/Headline",
                     "location": "City, Country",
                         "about": "About/Summary text",
+                            "isPremium": true or false,
                             "currentPosition": {
                 "title": "Job Title",
                     "company": "Company Name",
@@ -319,16 +707,16 @@ Extract and return ONLY a JSON object with this exact structure:
         - Extract ALL work experience entries(not just current)
             - Extract ALL education entries
                 - If information is missing, use empty string ""
+                    - For "isPremium": Analyze the profile text to detect if the user has LinkedIn Premium subscription:
+                      * Look for Premium badges, icons, or visual indicators mentioned in the text
+                      * Check for text mentions of "Premium", "LinkedIn Premium", "Premium Career", "Premium Business", or similar premium-related terms
+                      * Look for premium feature indicators or premium account markers
+                      * If any premium indicators are found, set isPremium to true, otherwise false
+                      * Be conservative - only set to true if you find clear evidence of premium subscription
                     - Return valid JSON only`;
 
         log("Sending GPT extraction request...");
-        const gptResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey} `
-            },
-            body: JSON.stringify({
+        const requestBody = {
                 model: "gpt-4o-mini",
                 messages: [
                     { role: "system", content: "You are a data extraction assistant. Extract LinkedIn profile data and return valid JSON only." },
@@ -336,8 +724,23 @@ Extract and return ONLY a JSON object with this exact structure:
                 ],
                 temperature: 0.1,
                 response_format: { type: "json_object" }
-            })
-        });
+        };
+        
+        const gptResponse = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            },
+            'gpt-4o-mini',
+            apiKey,
+            'profile_extraction',
+            'Extract structured profile data from LinkedIn profile text',
+            null
+        );
 
         if (!gptResponse.ok) {
             const err = await gptResponse.json();
@@ -345,7 +748,7 @@ Extract and return ONLY a JSON object with this exact structure:
         }
 
         const gptData = await gptResponse.json();
-        const content = gptData.choices[0].message.content;
+        const content = gptData.choices?.[0]?.message?.content || gptData.response?.choices?.[0]?.message?.content;
 
         log("Received GPT response, parsing JSON...");
         const parsed = JSON.parse(content);
@@ -357,7 +760,7 @@ Extract and return ONLY a JSON object with this exact structure:
     /**
      * Extract structured prospect data using GPT
      */
-    async function extractProspectWithGPT(profileText, activity, apiKey) {
+    async function extractProspectWithGPT(profileText, activity, apiKey, relatedProfiles = null,prospectId) {
         if (!apiKey) throw new Error("API key required for prospect extraction");
 
         log("[ProspectExtract] Starting extraction...");
@@ -447,13 +850,7 @@ RULES:
 - Return valid JSON only`;
 
         log("[ProspectExtract] Sending to GPT...");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            },
-            body: JSON.stringify({
+        const requestBody = {
                 model: "gpt-4o-mini",
                 messages: [
                     { role: "system", content: "You are a data extraction assistant. Extract LinkedIn profile data and return valid JSON only." },
@@ -461,8 +858,23 @@ RULES:
                 ],
                 temperature: 0.1,
                 response_format: { type: "json_object" }
-            })
-        });
+        };
+        
+        const response = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            },
+            'gpt-4o-mini',
+            apiKey,
+            'post_summarization',
+            'Summarize posts and extract prospect interests',
+            prospectId || null
+        );
 
         if (!response.ok) {
             const err = await response.json();
@@ -471,7 +883,7 @@ RULES:
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
+        const content = data.choices?.[0]?.message?.content || data.response?.choices?.[0]?.message?.content;
 
         log("[ProspectExtract] ✓ Received response, parsing...");
         const parsed = JSON.parse(content);
@@ -531,7 +943,7 @@ RULES:
      * Summarize posts and extract prospect interests using GPT
      * Now filters to only include posts with important content
      */
-    async function summarizePostsAndExtractInterests(posts, postUrls, tabId, apiKey) {
+    async function summarizePostsAndExtractInterests(posts, postUrls, tabId, apiKey, prospectId = null) {
         if (!apiKey) throw new Error("API key required for post summarization");
         
         let postsToAnalyze = [];
@@ -595,31 +1007,45 @@ Rules:
 - Return valid JSON only`;
 
         log("[PostSummary] Filtering posts for important content...");
-        const filterResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
+        const filterRequestBody = {
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are a sales intelligence assistant. Identify important posts. Return valid JSON only." },
+                { role: "user", content: filterPrompt }
+            ],
+            temperature: 0.2,
+            response_format: { type: "json_object" }
+        };
+        
+        const filterResponse = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(filterRequestBody)
             },
-            body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "You are a sales intelligence assistant. Identify important posts. Return valid JSON only." },
-                    { role: "user", content: filterPrompt }
-                ],
-                temperature: 0.2,
-                response_format: { type: "json_object" }
-            })
-        });
+            'gpt-4o-mini',
+            apiKey,
+            'post_filtering',
+            'Filter important posts from prospect activity',
+            null
+        );
 
         if (!filterResponse.ok) {
             const err = await filterResponse.json();
             log("[PostSummary] ✗ Filter API Error:", err.error?.message);
+            if (err.error === 'INSUFFICIENT_CREDITS' || err.code === 'INSUFFICIENT_CREDITS') {
+                const error = new Error('INSUFFICIENT_CREDITS');
+                error.code = 'INSUFFICIENT_CREDITS';
+                throw error;
+            }
             throw new Error(err.error?.message || 'Post Filtering API Error');
         }
 
         const filterData = await filterResponse.json();
-        const filterContent = filterData.choices[0].message.content;
+        const filterContent = filterData.choices?.[0]?.message?.content || filterData.response?.choices?.[0]?.message?.content;
         const filterResult = JSON.parse(filterContent);
 
         log(`[PostSummary] ✓ Identified ${filterResult.importantPosts?.length || 0} important posts`);
@@ -689,22 +1115,31 @@ Rules:
 - Return valid JSON only`;
 
         log("[PostSummary] Sending summarization request to GPT...");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
+        const requestBody = {
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are a sales intelligence assistant. Analyze posts and extract actionable insights. Return valid JSON only." },
+                { role: "user", content: prompt }
+            ],
+            temperature: 0.3,
+            response_format: { type: "json_object" }
+        };
+        
+        const response = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
             },
-            body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "You are a sales intelligence assistant. Analyze posts and extract actionable insights. Return valid JSON only." },
-                    { role: "user", content: prompt }
-                ],
-                temperature: 0.3,
-                response_format: { type: "json_object" }
-            })
-        });
+            'gpt-4o-mini',
+            apiKey,
+            'post_summarization',
+            'Summarize posts and extract prospect interests',
+            prospectId || null
+        );
 
         if (!response.ok) {
             const err = await response.json();
@@ -713,7 +1148,7 @@ Rules:
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
+        const content = data.choices?.[0]?.message?.content || data.response?.choices?.[0]?.message?.content;
 
         log("[PostSummary] ✓ Received response, parsing...");
         const parsed = JSON.parse(content);
@@ -725,7 +1160,7 @@ Rules:
     /**
      * Analyze related profiles to find relevant prospects
      */
-    async function analyzeRelatedProfiles(profiles, sellerGoal, icpDefinition, sellerOffer, apiKey) {
+    async function analyzeRelatedProfiles(profiles, sellerGoal, icpDefinition, sellerOffer, apiKey,prospectId) {
         if (!apiKey) throw new Error("API key required for profile analysis");
         if (!profiles || profiles.length === 0) {
             log("[RelatedProfiles] No profiles to analyze");
@@ -781,31 +1216,45 @@ Rules:
 - Return valid JSON only`;
 
         log("[RelatedProfiles] Sending analysis request to GPT...");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
+        const requestBody = {
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are a sales intelligence assistant. Analyze profiles and return valid JSON only." },
+                { role: "user", content: prompt }
+            ],
+            temperature: 0.3,
+            response_format: { type: "json_object" }
+        };
+        
+        const response = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
             },
-            body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "You are a sales intelligence assistant. Analyze profiles and return valid JSON only." },
-                    { role: "user", content: prompt }
-                ],
-                temperature: 0.3,
-                response_format: { type: "json_object" }
-            })
-        });
+            'gpt-4o-mini',
+            apiKey,
+            'related_profiles_analysis',
+            'Analyze related profiles for relevance to seller',
+            prospectId || null
+        );
 
         if (!response.ok) {
             const err = await response.json();
             log("[RelatedProfiles] ✗ API Error:", err.error?.message);
+            if (err.error === 'INSUFFICIENT_CREDITS' || err.code === 'INSUFFICIENT_CREDITS') {
+                const error = new Error('INSUFFICIENT_CREDITS');
+                error.code = 'INSUFFICIENT_CREDITS';
+                throw error;
+            }
             throw new Error(err.error?.message || 'Related Profiles Analysis API Error');
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
+        const content = data.choices?.[0]?.message?.content || data.response?.choices?.[0]?.message?.content;
 
         log("[RelatedProfiles] ✓ Received response, parsing...");
         const parsed = JSON.parse(content);
@@ -832,16 +1281,28 @@ Rules:
             
             const scoreColor = profile.relevanceScore >= 70 ? '#4caf50' : profile.relevanceScore >= 50 ? '#ffc107' : '#f44336';
             
+            // Ensure URL is properly formatted
+            let profileUrl = profile.url || '';
+            if (profileUrl && !profileUrl.startsWith('http')) {
+                if (profileUrl.startsWith('/')) {
+                    profileUrl = 'https://www.linkedin.com' + profileUrl;
+                } else if (profileUrl.startsWith('linkedin.com')) {
+                    profileUrl = 'https://www.' + profileUrl;
+                } else {
+                    profileUrl = 'https://www.linkedin.com/in/' + profileUrl;
+                }
+            }
+            
             profileCard.innerHTML = `
                 <div class="profile-header">
                     <div class="profile-info">
-                        <a href="${profile.url}" target="_blank" class="profile-link" data-url="${profile.url}">
-                            <strong>${profile.name}</strong>
+                        <a href="${profileUrl}" target="_blank" class="profile-link" data-url="${profileUrl}">
+                            <strong>${profile.name || 'Unknown'}</strong>
                         </a>
-                        <div class="profile-headline">${profile.headline}</div>
+                        <div class="profile-headline">${profile.headline || 'N/A'}</div>
                     </div>
                     <div class="relevance-score" style="color: ${scoreColor}">
-                        ${profile.relevanceScore}
+                        ${profile.relevanceScore || 0}
                     </div>
                 </div>
                 <div class="profile-details">
@@ -862,11 +1323,30 @@ Rules:
 
         // Add click handlers to open profiles in new tabs
         relatedProfilesContainer.querySelectorAll('.profile-link').forEach(link => {
-            link.addEventListener('click', (e) => {
+            link.addEventListener('click', async (e) => {
                 e.preventDefault();
-                const url = link.getAttribute('data-url');
+                e.stopPropagation();
+                const url = link.getAttribute('data-url') || link.getAttribute('href');
                 if (url) {
-                    chrome.tabs.create({ url: url });
+                    // Ensure URL is a full LinkedIn URL
+                    let fullUrl = url;
+                    if (!url.startsWith('http')) {
+                        if (url.startsWith('/')) {
+                            fullUrl = 'https://www.linkedin.com' + url;
+                        } else {
+                            fullUrl = 'https://www.linkedin.com/in/' + url;
+                        }
+                    }
+                    log(`[RelatedProfiles] Opening profile: ${fullUrl}`);
+                    try {
+                        await chrome.tabs.create({ url: fullUrl, active: true });
+                    } catch (error) {
+                        log(`[RelatedProfiles] Error opening profile: ${error.message}`);
+                        // Fallback: try opening in current window
+                        window.open(fullUrl, '_blank');
+                    }
+                } else {
+                    log('[RelatedProfiles] No URL found for profile link');
                 }
             });
         });
@@ -875,7 +1355,7 @@ Rules:
     /**
      * Research companies from prospect's experience in context of seller's offer
      */
-    async function researchCompanies(structuredProspect, sellerOffer, sellerGoal, icpDefinition, apiKey) {
+    async function researchCompanies(structuredProspect, sellerOffer, sellerGoal, icpDefinition, apiKey,prospectId) {
         if (!apiKey) throw new Error("API key required for company research");
         if (!structuredProspect || !structuredProspect.experience || structuredProspect.experience.length === 0) {
             log("[CompanyResearch] No experience data available");
@@ -971,22 +1451,31 @@ Rules:
 - Return valid JSON only`;
 
         log("[CompanyResearch] Sending research request to GPT...");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
+        const requestBody = {
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are a sales research assistant. Analyze companies and return valid JSON only." },
+                { role: "user", content: prompt }
+            ],
+            temperature: 0.3,
+            response_format: { type: "json_object" }
+        };
+        
+        const response = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
             },
-            body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "You are a sales research assistant. Analyze companies and return valid JSON only." },
-                    { role: "user", content: prompt }
-                ],
-                temperature: 0.3,
-                response_format: { type: "json_object" }
-            })
-        });
+            'gpt-4o-mini',
+            apiKey,
+            'company_research',
+            'Research companies from prospect work history',
+            prospectId || null
+        );
 
         if (!response.ok) {
             const err = await response.json();
@@ -995,12 +1484,12 @@ Rules:
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
+        const content = data.choices?.[0]?.message?.content || data.response?.choices?.[0]?.message?.content;
 
         log("[CompanyResearch] ✓ Received response, parsing...");
         const parsed = JSON.parse(content);
         log(`[CompanyResearch] ✓ Research complete for ${parsed.currentCompany?.companyName || 'companies'}`);
-        
+
         return parsed;
     }
 
@@ -1146,41 +1635,23 @@ Rules:
         }
     }
 
-    async function callOpenAI(inputs, prospectData, senderData, activity, company, structuredProspect, companyResearch, postSummary) {
-        log("[CallOpenAI] Sender data length: " + (senderData ? senderData.length : 0));
-        log("[CallOpenAI] Prospect data length: " + prospectData.length);
+    async function callOpenAI(inputs, senderStructured, activity, company, structuredProspect, companyResearch, postSummary, prospectId = null) {
+        log("[CallOpenAI] Structured sender: " + (senderStructured ? senderStructured.name : 'none'));
         log("[CallOpenAI] Structured prospect: " + (structuredProspect ? structuredProspect.name : 'none'));
-        log("[CallOpenAI] Sender preview: " + (senderData ? senderData.substring(0, 300) : "N/A"));
-        log("[CallOpenAI] Prospect preview: " + prospectData.substring(0, 300));
+        log("[CallOpenAI] Sender preview: " + (senderStructured ? `${senderStructured.name} - ${senderStructured.headline || 'N/A'}` : "N/A"));
+        log("[CallOpenAI] Prospect preview: " + (structuredProspect ? `${structuredProspect.name} - ${structuredProspect.headline || 'N/A'}` : "N/A"));
 
         log("[CallOpenAI] Activity: " + (activity ? `${activity.posts.length} posts, ${activity.likes.length} likes` : 'none'));
         log("[CallOpenAI] Company: " + (company?.name || 'none'));
         log("[CallOpenAI] Company Research: " + (companyResearch ? `Available for ${companyResearch.currentCompany?.companyName || 'companies'}` : 'Not available'));
         log("[CallOpenAI] Post Summary: " + (postSummary ? `Available - ${postSummary.keyTopics?.length || 0} topics, ${postSummary.buyingSignals?.length || 0} signals` : 'Not available'));
 
-        // Format activity for GPT prompt
-        let activityText = '';
-        if (activity && (activity.posts.length > 0 || activity.likes.length > 0 || activity.comments.length > 0)) {
-            activityText = '\n\n## PROSPECT RECENT ACTIVITY\n';
-            if (activity.posts.length > 0) {
-                activityText += '\n### Recent Posts:\n';
-                activity.posts.forEach((post, i) => {
-                    activityText += `${i + 1}. ${post.text}\n`;
-                });
-            }
-            if (activity.likes.length > 0) {
-                activityText += '\n### Recently Liked:\n';
-                activity.likes.forEach((like, i) => {
-                    activityText += `${i + 1}. ${like.text}\n`;
-                });
-            }
-            if (activity.comments.length > 0) {
-                activityText += '\n### Recent Comments:\n';
-                activity.comments.forEach((comment, i) => {
-                    activityText += `${i + 1}. ${comment.text}\n`;
-                });
-            }
-        }
+        // Get sender premium status
+        const senderStorage = await chrome.storage.local.get('sender_is_premium');
+        const senderIsPremium = senderStorage.sender_is_premium || false;
+        log("[CallOpenAI] Sender premium status: " + (senderIsPremium ? 'Premium (400 char limit)' : 'Free (200 char limit)'));
+
+        // Note: We use postSummary instead of raw activity content for efficiency and better insights
 
         const prompt = `
 You are an elite Sales Copilot.
@@ -1193,20 +1664,23 @@ You are an elite Sales Copilot.
     - Proof Points: ${inputs.proof}
     - ICP: ${inputs.icp}
 
-    [SENDER PROFILE RAW DATA]
-        ${senderData ? senderData.substring(0, 15000) : "No sender profile provided."}
+    [SENDER PROFILE STRUCTURED DATA]
+        ${senderStructured ? JSON.stringify(senderStructured, null, 2) : "No sender profile provided."}
+        This is the structured profile data of the seller (you). Use this to:
+        - Find shared connections, experiences, or education with the prospect
+        - Identify common ground for personalization
+        - Understand the seller's background and credibility
+        - Match sender's experience with prospect's needs
 
 ## 2. PLAY Layer(The Strategy)
     - Risk Level: ${inputs.risk}
     - Offer Type: ${inputs.offerType}
 
 ## 3. THEM Layer(Prospect Data)
-    [PROSPECT PROFILE RAW DATA]
-        ${prospectData.substring(0, 40000)}
-${activityText}
-
     [STRUCTURED PROSPECT DATA]
         ${structuredProspect ? JSON.stringify(structuredProspect, null, 2) : 'Not available'}
+        This is the complete structured profile data of the prospect. Use this for all analysis.
+        The structured data includes: name, headline, location, about, current position, experience history, education, interests, and related profiles.
     
     [COMPANY INFO]
         ${company ? `Company: ${company.name}\nLinkedIn URL: ${company.linkedinUrl || 'N/A'}` : 'Not available'}
@@ -1222,6 +1696,7 @@ ${activityText}
 
     [POST SUMMARY & INTERESTS]
         ${postSummary ? JSON.stringify(postSummary, null, 2) : 'Not available'}
+        **IMPORTANT: Use this post summary object instead of raw post content. This contains analyzed and summarized insights from the prospect's LinkedIn activity.**
         This is a detailed analysis of the prospect's LinkedIn posts, summarizing their content and extracting:
         - Key topics and professional focus areas
         - Pain points and challenges mentioned
@@ -1236,6 +1711,7 @@ ${activityText}
         - Identify buying signals from their content
         - Create personalized conversation starters
         - Align messaging with their professional focus
+        **Do NOT request or use raw post content - all post insights are in this summary object.**
 
 # INSTRUCTIONS
 
@@ -1277,6 +1753,12 @@ Use the structured prospect data AND the detailed post summary to analyze:
 
 ## D.MESSAGING ENGINE
 Generate "Connection Request" & "Cold Email" using ** ${inputs.risk} ** strategy.
+
+**CONNECTION REQUEST LENGTH LIMIT**:
+${senderIsPremium ? '- Sender has LinkedIn Premium subscription - Connection request can be up to 400 characters' : '- Sender has free LinkedIn account - Connection request must be maximum 200 characters'}
+- Keep the connection request concise and impactful
+- Every word counts, especially for free accounts (200 char limit)
+- Premium accounts (400 char limit) can include more context and personalization
 
 - ** IF Shared Context > 50 AND Risk != 'Safe' **:
         - USE THE SHARED SIGNAL as the hook(e.g. "Saw we both worked at Oracle...").
@@ -1355,7 +1837,7 @@ Also generate complete sequences:
                 "followUp3": "text...",
                 "breakupMessage": "text..."
             },
-            "connectionRequest": "text...",
+            "connectionRequest": "text... (MUST be ${senderIsPremium ? 'maximum 400 characters' : 'maximum 200 characters'} - ${senderIsPremium ? 'premium account allows longer messages' : 'free account has strict 200 character limit'})",
             "coldEmail": "text...",
             "draftStrategy": "Brief description of the angle used",
             "signalsUsed": ["signal1", "signal2"],
@@ -1366,13 +1848,8 @@ Also generate complete sequences:
             `;
 
         log("Sending request to OpenAI...");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${inputs.apiKey}`
-            },
-            body: JSON.stringify({
+        log("Final Prompt: " + prompt);
+        const requestBody = {
                 model: "gpt-4o-mini",
                 messages: [
                     { role: "system", content: "You are a JSON-speaking sales strategist." },
@@ -1380,8 +1857,23 @@ Also generate complete sequences:
                 ],
                 temperature: inputs.risk === 'Risky' ? 0.9 : 0.5,
                 response_format: { type: "json_object" }
-            })
-        });
+        };
+        
+        const response = await callGPTWithTracking(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            },
+            'gpt-4o-mini',
+            inputs.apiKey,
+            'sales_analysis',
+            'Generate fit score, outreach strategy, and personalized messages',
+            prospectId || null
+        );
 
         if (!response.ok) {
             const err = await response.json();
@@ -1389,12 +1881,38 @@ Also generate complete sequences:
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
+        const content = data.choices?.[0]?.message?.content || data.response?.choices?.[0]?.message?.content;
 
         try {
             return JSON.parse(content);
         } catch (e) {
             throw new Error("Failed to parse AI response as JSON.");
+        }
+    }
+
+    // === Save analysis to backend ===
+    async function saveAnalysisToBackend(analysisPayload) {
+        try {
+            const currentUserId = await getUserId();
+            const response = await fetch(`${BACKEND_URL}/api/analyses`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-user-id': currentUserId
+                },
+                body: JSON.stringify(analysisPayload)
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Failed to save analysis');
+            }
+
+            const result = await response.json();
+            return result;
+        } catch (error) {
+            log(`[SaveAnalysis] Error: ${error.message}`);
+            throw error;
         }
     }
 
@@ -1421,8 +1939,26 @@ Also generate complete sequences:
             offerType: offerTypeInput.value
         };
 
-        if (!inputData.apiKey) return updateStatus('Missing API Key');
+        // Check if using backend credits or own API key
+        const useBackend = useBackendCreditsCheckbox.checked;
+        if (!useBackend && !inputData.apiKey) {
+            return updateStatus('Missing API Key');
+        }
         if (!inputData.goal) return updateStatus('Missing Goal');
+
+        // Check credits if using backend
+        if (useBackend) {
+            const estimatedTokens = 5000; // Rough estimate for full analysis
+            const hasCredits = await hasEnoughCredits(estimatedTokens);
+            if (!hasCredits) {
+                const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
+                if (buyCredits) {
+                    showTab('tab-settings');
+                    buyCreditsBtn.click();
+                }
+                return updateStatus('Insufficient Credits');
+            }
+        }
 
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1440,14 +1976,19 @@ Also generate complete sequences:
             log("[Regenerate] Using cached research data");
             log(`[Regenerate] Strategy: ${inputData.risk} | ${inputData.offerType}`);
 
-            const senderData = (await chrome.storage.local.get('sender_profile_cache')).sender_profile_cache;
+            const senderStructured = (await chrome.storage.local.get('sender_profile_structured')).sender_profile_structured;
+
+            if (!senderStructured) {
+                alert('Please capture your profile first in Settings tab.');
+                showTab('tab-settings');
+                return;
+            }
 
             // Only regenerate messages with new strategy
             updateStatus("Generating messages...");
             const analysis = await callOpenAI(
                 inputData, 
-                cached.profileData, 
-                senderData, 
+                senderStructured, 
                 cached.activity, 
                 cached.company,
                 cached.structuredProspect,
@@ -1457,6 +1998,48 @@ Also generate complete sequences:
 
             // Render the results
             renderResults(analysis, inputData.risk);
+            
+            // Save regenerated analysis to backend if using backend credits
+            const useBackend = useBackendCreditsCheckbox.checked;
+            if (useBackend) {
+                try {
+                    // Get prospectId from cached data or current profile
+                    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (tab && tab.url.includes('linkedin.com/in/')) {
+                        // Try to get prospectId from backend by profile URL
+                        const currentUserId = await getUserId();
+                        const prospectResponse = await fetch(`${BACKEND_URL}/api/prospects`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'x-user-id': currentUserId
+                            },
+                            body: JSON.stringify({ linkedinProfileUrl: tab.url })
+                        });
+                        
+                        if (prospectResponse.ok) {
+                            const prospectResult = await prospectResponse.json();
+                            if (prospectResult.prospectId) {
+                                await saveAnalysisToBackend({
+                                    prospectId: prospectResult.prospectId,
+                                    sellerGoal: inputData.goal,
+                                    sellerOffer: inputData.offer,
+                                    sellerIcp: inputData.icp,
+                                    sellerProof: inputData.proof,
+                                    sellerRiskLevel: inputData.risk,
+                                    sellerOfferType: inputData.offerType,
+                                    analysisData: analysis
+                                });
+                                log("[SaveAnalysis] ✓ Regenerated analysis saved to backend");
+                            }
+                        }
+                    }
+                } catch (saveError) {
+                    log(`[SaveAnalysis] ⚠ Failed to save regenerated analysis: ${saveError.message}`);
+                    // Don't block the UI if save fails
+                }
+            }
+            
             showTab('tab-results');
             updateStatus("Messages regenerated!");
             log("Message regeneration complete.");
@@ -1480,10 +2063,34 @@ Also generate complete sequences:
             offerType: offerTypeInput.value
         };
 
-        if (!inputData.apiKey) return updateStatus('Missing API Key');
+        // Check if using backend credits or own API key
+        const useBackend = useBackendCreditsCheckbox.checked;
+        if (!useBackend && !inputData.apiKey) {
+            return updateStatus('Missing API Key');
+        }
         if (!inputData.goal) return updateStatus('Missing Goal');
 
-        const senderData = (await chrome.storage.local.get('sender_profile_cache')).sender_profile_cache;
+        // Check credits if using backend
+        if (useBackend) {
+            const estimatedTokens = 5000; // Rough estimate for full analysis
+            const hasCredits = await hasEnoughCredits(estimatedTokens);
+            if (!hasCredits) {
+                const buyCredits = confirm('Insufficient credits. Would you like to buy more?');
+                if (buyCredits) {
+                    showTab('tab-settings');
+                    buyCreditsBtn.click();
+                }
+                return updateStatus('Insufficient Credits');
+            }
+        }
+
+        const senderStructured = (await chrome.storage.local.get('sender_profile_structured')).sender_profile_structured;
+
+        if (!senderStructured) {
+            alert('Please capture your profile first in Settings tab.');
+            showTab('tab-settings');
+            return;
+        }
 
         updateStatus("Connecting...");
         
@@ -1580,6 +2187,48 @@ Also generate complete sequences:
                 log(`[RecentActivity] ⚠ Could not close tab: ${e.message}`);
             }
 
+            // Create prospect in database
+            let prospectId = null;
+            const useBackend = useBackendCreditsCheckbox.checked;
+            if (useBackend) {
+                try {
+                    const currentUserId = await getUserId();
+                    const prospectData = {
+                        linkedinProfileUrl: tab.url,
+                        name: null, // Will be updated after extraction
+                        headline: null,
+                        company: null,
+                        location: null
+                    };
+                    log(`[Prospect] Creating prospect for URL: ${tab.url}`);
+                    log(`[Prospect] User ID: ${currentUserId}`);
+                    const createResponse = await fetch(`${BACKEND_URL}/api/prospects`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-user-id': currentUserId
+                        },
+                        body: JSON.stringify(prospectData)
+                    });
+                    
+                    log(`[Prospect] Response status: ${createResponse.status}`);
+                    
+                    if (createResponse.ok) {
+                        const result = await createResponse.json();
+                        prospectId = result.prospectId;
+                        log(`[Prospect] ✓ Created prospect with ID: ${prospectId}`);
+                    } else {
+                        const errorData = await createResponse.json().catch(() => ({ error: 'Unknown error' }));
+                        log(`[Prospect] ✗ Failed to create prospect: ${errorData.error || 'Unknown error'}`);
+                        log(`[Prospect] Response: ${JSON.stringify(errorData)}`);
+                    }
+                } catch (e) {
+                    log(`[Prospect] ✗ Error creating prospect: ${e.message}`);
+                    console.error('[Prospect] Full error:', e);
+                    // Don't throw - continue with analysis even if prospect creation fails
+                }
+            }
+            
             updateStatus("Extracting structured data...");
             log("[Extract] Prospect data length: " + response.data.length);
             log("[Extract] Activity: " + (activity ? `${activity.posts.length} posts` : 'none'));
@@ -1589,7 +2238,8 @@ Also generate complete sequences:
                 response.data, 
                 activity, 
                 inputData.apiKey,
-                response.relatedProfiles
+                response.relatedProfiles,
+                prospectId
             );
             log("[Extract] Structured prospect: " + JSON.stringify(structuredProspect));
             log("[Extract] ✓ Structured prospect extracted: " + structuredProspect.name);
@@ -1612,7 +2262,8 @@ Also generate complete sequences:
                 activity?.posts || [],
                 postUrls,
                 tab.id,
-                inputData.apiKey
+                inputData.apiKey,
+                prospectId
             );
             log("[PostSummary] Post analysis: " + (postSummary ? `Complete - ${postSummary.keyTopics?.length || 0} topics` : "Skipped"));
             log("[PostSummary] Post summary: " + JSON.stringify(postSummary));
@@ -1623,7 +2274,8 @@ Also generate complete sequences:
                 inputData.offer,
                 inputData.goal,
                 inputData.icp,
-                inputData.apiKey
+                inputData.apiKey,
+                prospectId
             );
             log("[Research] Company research: " + (companyResearch ? "Complete" : "Skipped"));
 
@@ -1639,7 +2291,8 @@ Also generate complete sequences:
                     inputData.goal,
                     inputData.icp,
                     inputData.offer,
-                    inputData.apiKey
+                    inputData.apiKey,
+                    prospectId
                 );
                 log(`[RelatedProfiles] ✓ Found ${relevantProfiles.length} relevant profiles`);
             } else {
@@ -1647,17 +2300,18 @@ Also generate complete sequences:
             }
 
             updateStatus("Analyzing...");
-            log("[CallOpenAI] Sender data length: " + (senderData ? senderData.length : 0));
-            log("[CallOpenAI] Sender preview: " + (senderData ? senderData.substring(0, 300) : "N/A"));
+            log("[CallOpenAI] Structured sender: " + (senderStructured ? senderStructured.name : 'none'));
+            log("[CallOpenAI] Sender preview: " + (senderStructured ? `${senderStructured.name} - ${senderStructured.headline || 'N/A'}` : "N/A"));
+            
             const analysis = await callOpenAI(
                 inputData, 
-                response.data, 
-                senderData, 
+                senderStructured, 
                 activity, 
                 response.company,
                 structuredProspect,
                 companyResearch,
-                postSummary
+                postSummary,
+                prospectId
             );
 
             // Store analysis results for reuse
@@ -1670,7 +2324,6 @@ Also generate complete sequences:
                     postSummary: postSummary,
                     companyResearch: companyResearch,
                     activity: activity,
-                    profileData: response.data,
                     company: response.company,
                     timestamp: new Date().toISOString()
                 }
@@ -1685,6 +2338,26 @@ Also generate complete sequences:
                 renderRelatedProfiles(relevantProfiles);
             } else {
                 relatedProfilesContainer.innerHTML = '<p class="empty-state">No related profiles found or analyzed.</p>';
+            }
+            
+            // Save analysis to backend if using backend credits
+            if (useBackendCreditsCheckbox.checked) {
+                try {
+                    await saveAnalysisToBackend({
+                        prospectId: prospectId,
+                        sellerGoal: inputData.goal,
+                        sellerOffer: inputData.offer,
+                        sellerIcp: inputData.icp,
+                        sellerProof: inputData.proof,
+                        sellerRiskLevel: inputData.risk,
+                        sellerOfferType: inputData.offerType,
+                        analysisData: analysis
+                    });
+                    log("[SaveAnalysis] ✓ Analysis saved to backend");
+                } catch (saveError) {
+                    log(`[SaveAnalysis] ⚠ Failed to save analysis: ${saveError.message}`);
+                    // Don't block the UI if save fails
+                }
             }
             
             showTab('tab-results'); // Switch to results view
