@@ -72,19 +72,33 @@ const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) ||
 // CORS configuration - restrict to extension origin if provided
 const corsOptions = {
     origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests) if API key is provided
-        if (!origin && process.env.ALLOW_NO_ORIGIN === 'true') {
+        // Allow requests with no origin (like mobile apps, curl, Postman, or API clients)
+        if (!origin) {
             return callback(null, true);
         }
         // Allow Chrome extension origins
-        if (origin && (origin.startsWith('chrome-extension://') || origin === process.env.FRONTEND_URL)) {
-            callback(null, true);
-        } else if (process.env.NODE_ENV === 'development') {
-            // In development, allow all origins
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
+        if (origin.startsWith('chrome-extension://')) {
+            return callback(null, true);
         }
+        // Allow specific frontend URL if configured
+        if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
+            return callback(null, true);
+        }
+        // Allow all origins in development
+        if (process.env.NODE_ENV === 'development') {
+            return callback(null, true);
+        }
+        // In production, allow API requests (security handled by API key validation)
+        // Set ALLOW_API_REQUESTS=true to enable this, or ALLOW_NO_ORIGIN=true for requests without origin
+        if (process.env.ALLOW_API_REQUESTS === 'true' || process.env.ALLOW_NO_ORIGIN === 'true') {
+            return callback(null, true);
+        }
+        // If BACKEND_URL is set and matches, allow it (for same-origin requests)
+        if (process.env.BACKEND_URL && origin === process.env.BACKEND_URL) {
+            return callback(null, true);
+        }
+        // Default: block in production for security
+        callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
     optionsSuccessStatus: 200
