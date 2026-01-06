@@ -34,11 +34,11 @@ jobs:
 
       - name: Build and push Docker image
         env:
-          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_PROD_SANDBOX}}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_PROD_SANDBOX }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
         run: |
-          docker build -f linkedin/Dockerfile \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:linkedin-${{ github.sha }} linkedin
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:audio-testing-${{ github.sha }}
+          docker build -f Dockerfile \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:linkedin-${{ github.sha }} .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:linkedin-${{ github.sha }}
 
       - name: Update ECS service
         id: ecs-deploy
