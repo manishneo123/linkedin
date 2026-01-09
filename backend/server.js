@@ -558,6 +558,48 @@ async function initializeDatabase() {
             )
         `);
         
+        // Create content_analyses table (for storing content inspiration analyses)
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS content_analyses (
+                analysis_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                profile_url VARCHAR(500) NOT NULL,
+                profile_name VARCHAR(255),
+                analysis_type VARCHAR(50) DEFAULT 'content_inspiration',
+                analysis_data JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                INDEX idx_user_id (user_id),
+                INDEX idx_profile_url (profile_url),
+                INDEX idx_analysis_type (analysis_type),
+                INDEX idx_created_at (created_at)
+            )
+        `);
+        
+        // Create generated_content table (for storing AI-generated LinkedIn content)
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS generated_content (
+                content_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                content_type VARCHAR(50) NOT NULL,
+                topic VARCHAR(500),
+                tone VARCHAR(50),
+                content TEXT NOT NULL,
+                title VARCHAR(500),
+                strategy TEXT,
+                tips JSON,
+                hashtags JSON,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                INDEX idx_user_id (user_id),
+                INDEX idx_content_type (content_type),
+                INDEX idx_created_at (created_at)
+            )
+        `);
+        
         connection.release();
         console.log('Database initialized successfully');
     } catch (error) {
@@ -962,6 +1004,205 @@ app.post('/api/openai-proxy', validateApiKey, rateLimitMiddleware, async (req, r
         await connection.rollback();
         connection.release();
         console.error('OpenAI Proxy Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Content Analyses endpoints
+app.post('/api/content-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const {
+            profileUrl,
+            profileName,
+            analysisType,
+            analysisData
+        } = req.body;
+        
+        if (!analysisData || !profileUrl) {
+            return res.status(400).json({ error: 'Analysis data and profile URL are required' });
+        }
+        
+        const connection = await pool.getConnection();
+        try {
+            // Check if analysis already exists for this user and profile URL
+            const [existing] = await connection.query(
+                `SELECT analysis_id FROM content_analyses 
+                WHERE user_id = ? AND profile_url = ? 
+                LIMIT 1`,
+                [userId, profileUrl]
+            );
+            
+            let analysisId;
+            if (existing && existing.length > 0) {
+                // Update existing analysis
+                analysisId = existing[0].analysis_id;
+                await connection.query(
+                    `UPDATE content_analyses 
+                    SET profile_name = ?, 
+                        analysis_type = ?, 
+                        analysis_data = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE analysis_id = ?`,
+                    [
+                        profileName || null,
+                        analysisType || 'content_inspiration',
+                        JSON.stringify(analysisData),
+                        analysisId
+                    ]
+                );
+            } else {
+                // Create new analysis
+                analysisId = uuidv4();
+                await connection.query(
+                    `INSERT INTO content_analyses (
+                        analysis_id, user_id, profile_url, profile_name, analysis_type, analysis_data
+                    ) VALUES (?, ?, ?, ?, ?, ?)`,
+                    [
+                        analysisId,
+                        userId,
+                        profileUrl,
+                        profileName || null,
+                        analysisType || 'content_inspiration',
+                        JSON.stringify(analysisData)
+                    ]
+                );
+            }
+            
+            res.json({ 
+                success: true,
+                analysisId: analysisId,
+                updated: existing && existing.length > 0
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Content Analysis Save Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/content-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { limit = 50, offset = 0 } = req.query;
+        
+        const connection = await pool.getConnection();
+        try {
+            const [analyses] = await connection.query(
+                `SELECT 
+                    analysis_id, profile_url, profile_name, analysis_type, 
+                    analysis_data, created_at
+                FROM content_analyses 
+                WHERE user_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT ? OFFSET ?`,
+                [userId, parseInt(limit), parseInt(offset)]
+            );
+            
+            // Parse JSON data
+            const parsedAnalyses = analyses.map(a => ({
+                ...a,
+                analysis_data: typeof a.analysis_data === 'string' 
+                    ? JSON.parse(a.analysis_data) 
+                    : a.analysis_data
+            }));
+            
+            res.json({ 
+                success: true,
+                analyses: parsedAnalyses 
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Content Analysis Get Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.delete('/api/content-analyses/:analysisId', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { analysisId } = req.params;
+        
+        const connection = await pool.getConnection();
+        try {
+            const [result] = await connection.query(
+                'DELETE FROM content_analyses WHERE analysis_id = ? AND user_id = ?',
+                [analysisId, userId]
+            );
+            
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: 'Analysis not found or access denied' });
+            }
+            
+            res.json({ 
+                success: true,
+                message: 'Analysis deleted successfully' 
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Content Analysis Delete Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Generated Content endpoints
+app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const {
+            contentType,
+            topic,
+            tone,
+            content,
+            title,
+            strategy,
+            tips,
+            hashtags,
+            metadata
+        } = req.body;
+        
+        if (!content || !contentType) {
+            return res.status(400).json({ error: 'Content and content type are required' });
+        }
+        
+        const connection = await pool.getConnection();
+        try {
+            const contentId = uuidv4();
+            
+            await connection.query(
+                `INSERT INTO generated_content (
+                    content_id, user_id, content_type, topic, tone, content, title, strategy, tips, hashtags, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    contentId,
+                    userId,
+                    contentType,
+                    topic || null,
+                    tone || null,
+                    content,
+                    title || null,
+                    strategy || null,
+                    tips ? JSON.stringify(tips) : null,
+                    hashtags ? JSON.stringify(hashtags) : null,
+                    metadata ? JSON.stringify(metadata) : null
+                ]
+            );
+            
+            res.json({ 
+                success: true,
+                contentId: contentId 
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Generated Content Save Error:', error);
         res.status(500).json({ error: error.message });
     }
 });

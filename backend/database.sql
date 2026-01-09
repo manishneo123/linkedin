@@ -100,6 +100,27 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Analyses table (for storing complete analysis results)
+-- Generated Content table (for storing AI-generated LinkedIn content)
+CREATE TABLE IF NOT EXISTS generated_content (
+    content_id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    content_type VARCHAR(50) NOT NULL,
+    topic VARCHAR(500),
+    tone VARCHAR(50),
+    content TEXT NOT NULL,
+    title VARCHAR(500),
+    strategy TEXT,
+    tips JSON,
+    hashtags JSON,
+    metadata JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_content_type (content_type),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS analyses (
     analysis_id VARCHAR(255) PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL,
@@ -119,6 +140,23 @@ CREATE TABLE IF NOT EXISTS analyses (
     FOREIGN KEY (prospect_id) REFERENCES prospects(prospect_id) ON DELETE SET NULL,
     INDEX idx_user_id (user_id),
     INDEX idx_prospect_id (prospect_id),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Content Analyses table (for storing content inspiration analyses)
+CREATE TABLE IF NOT EXISTS content_analyses (
+    analysis_id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    profile_url VARCHAR(500) NOT NULL,
+    profile_name VARCHAR(255),
+    analysis_type VARCHAR(50) DEFAULT 'content_inspiration',
+    analysis_data JSON NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_profile_url (profile_url),
+    INDEX idx_analysis_type (analysis_type),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
