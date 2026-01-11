@@ -60,6 +60,12 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const OpenAI = require('openai');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const multer = require('multer');
+const mammoth = require('mammoth');
+const pdfParse = require('pdf-parse');
+const fs = require('fs');
+const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } = require('docx');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -90,6 +96,34 @@ const corsOptions = {
     optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
+
+// Configure multer for file uploads (memory storage for CV files)
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 10 * 1024 * 1024 // 10MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        // Accept text, DOCX, DOC, and PDF files
+        const allowedMimes = [
+            'text/plain',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/msword',
+            'application/pdf'
+        ];
+        const allowedExtensions = ['.txt', '.docx', '.doc', '.pdf'];
+        
+        const fileExtension = path.extname(file.originalname).toLowerCase();
+        const isValidMime = allowedMimes.includes(file.mimetype);
+        const isValidExtension = allowedExtensions.includes(fileExtension);
+        
+        if (isValidMime || isValidExtension) {
+            cb(null, true);
+        } else {
+            cb(new Error(`Invalid file type. Allowed: ${allowedExtensions.join(', ')}`), false);
+        }
+    }
+});
 
 // MySQL Database Connection Pool
 // Use defaults if env vars are not set (for development)
@@ -597,6 +631,41 @@ async function initializeDatabase() {
                 INDEX idx_user_id (user_id),
                 INDEX idx_content_type (content_type),
                 INDEX idx_created_at (created_at)
+            )
+        `);
+        
+        // Create job_analyses table (for storing LinkedIn job posting analyses)
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS job_analyses (
+                job_analysis_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                job_url VARCHAR(500) NOT NULL,
+                job_title VARCHAR(500),
+                company_name VARCHAR(255),
+                location VARCHAR(255),
+                employment_type VARCHAR(100),
+                seniority_level VARCHAR(100),
+                job_function VARCHAR(255),
+                industries JSON,
+                description TEXT,
+                requirements TEXT,
+                responsibilities TEXT,
+                skills_required JSON,
+                qualifications JSON,
+                benefits JSON,
+                salary_range VARCHAR(255),
+                posted_date VARCHAR(100),
+                applicants_count VARCHAR(100),
+                raw_data JSON,
+                analyzed_data JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_job_url (job_url),
+                INDEX idx_company_name (company_name),
+                INDEX idx_job_title (job_title),
+                INDEX idx_created_at (created_at),
+                UNIQUE KEY unique_user_job (user_id, job_url)
             )
         `);
         
@@ -1150,6 +1219,1282 @@ app.delete('/api/content-analyses/:analysisId', validateApiKey, rateLimitMiddlew
         res.status(500).json({ error: error.message });
     }
 });
+
+// Job Analyses endpoints
+app.post('/api/job-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const {
+            jobUrl,
+            jobTitle,
+            companyName,
+            location,
+            employmentType,
+            seniorityLevel,
+            jobFunction,
+            industries,
+            description,
+            requirements,
+            responsibilities,
+            skillsRequired,
+            qualifications,
+            benefits,
+            salaryRange,
+            postedDate,
+            applicantsCount,
+            rawData,
+            analyzedData
+        } = req.body;
+        
+        if (!jobUrl) {
+            return res.status(400).json({ error: 'Job URL is required' });
+        }
+        
+        const connection = await pool.getConnection();
+        try {
+            // Check if job analysis already exists for this user and job URL
+            const [existing] = await connection.query(
+                `SELECT job_analysis_id FROM job_analyses 
+                WHERE user_id = ? AND job_url = ? 
+                LIMIT 1`,
+                [userId, jobUrl]
+            );
+            
+            let jobAnalysisId;
+            if (existing && existing.length > 0) {
+                // Update existing analysis
+                jobAnalysisId = existing[0].job_analysis_id;
+                await connection.query(
+                    `UPDATE job_analyses 
+                    SET job_title = ?, 
+                        company_name = ?,
+                        location = ?,
+                        employment_type = ?,
+                        seniority_level = ?,
+                        job_function = ?,
+                        industries = ?,
+                        description = ?,
+                        requirements = ?,
+                        responsibilities = ?,
+                        skills_required = ?,
+                        qualifications = ?,
+                        benefits = ?,
+                        salary_range = ?,
+                        posted_date = ?,
+                        applicants_count = ?,
+                        raw_data = ?,
+                        analyzed_data = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_analysis_id = ?`,
+                    [
+                        jobTitle || null,
+                        companyName || null,
+                        location || null,
+                        employmentType || null,
+                        seniorityLevel || null,
+                        jobFunction || null,
+                        industries ? JSON.stringify(industries) : null,
+                        description || null,
+                        requirements || null,
+                        responsibilities || null,
+                        skillsRequired ? JSON.stringify(skillsRequired) : null,
+                        qualifications ? JSON.stringify(qualifications) : null,
+                        benefits ? JSON.stringify(benefits) : null,
+                        salaryRange || null,
+                        postedDate || null,
+                        applicantsCount || null,
+                        rawData ? JSON.stringify(rawData) : null,
+                        analyzedData ? JSON.stringify(analyzedData) : null,
+                        jobAnalysisId
+                    ]
+                );
+            } else {
+                // Create new analysis
+                jobAnalysisId = uuidv4();
+                await connection.query(
+                    `INSERT INTO job_analyses (
+                        job_analysis_id, user_id, job_url, job_title, company_name, location,
+                        employment_type, seniority_level, job_function, industries, description,
+                        requirements, responsibilities, skills_required, qualifications, benefits,
+                        salary_range, posted_date, applicants_count, raw_data, analyzed_data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        jobAnalysisId,
+                        userId,
+                        jobUrl,
+                        jobTitle || null,
+                        companyName || null,
+                        location || null,
+                        employmentType || null,
+                        seniorityLevel || null,
+                        jobFunction || null,
+                        industries ? JSON.stringify(industries) : null,
+                        description || null,
+                        requirements || null,
+                        responsibilities || null,
+                        skillsRequired ? JSON.stringify(skillsRequired) : null,
+                        qualifications ? JSON.stringify(qualifications) : null,
+                        benefits ? JSON.stringify(benefits) : null,
+                        salaryRange || null,
+                        postedDate || null,
+                        applicantsCount || null,
+                        rawData ? JSON.stringify(rawData) : null,
+                        analyzedData ? JSON.stringify(analyzedData) : null
+                    ]
+                );
+            }
+            
+            res.json({ 
+                success: true,
+                jobAnalysisId: jobAnalysisId,
+                updated: existing && existing.length > 0
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Job Analysis Save Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/job-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { limit = 50, offset = 0, jobUrl } = req.query;
+        
+        const connection = await pool.getConnection();
+        try {
+            let query = `SELECT 
+                job_analysis_id, job_url, job_title, company_name, location,
+                employment_type, seniority_level, job_function, industries,
+                description, requirements, responsibilities, skills_required,
+                qualifications, benefits, salary_range, posted_date, applicants_count,
+                raw_data, analyzed_data, created_at, updated_at
+            FROM job_analyses 
+            WHERE user_id = ?`;
+            const params = [userId];
+            
+            if (jobUrl) {
+                query += ' AND job_url = ?';
+                params.push(jobUrl);
+            }
+            
+            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+            params.push(parseInt(limit), parseInt(offset));
+            
+            const [analyses] = await connection.query(query, params);
+            
+            // Parse JSON fields
+            const parsedAnalyses = analyses.map(a => ({
+                ...a,
+                industries: a.industries ? (typeof a.industries === 'string' ? JSON.parse(a.industries) : a.industries) : null,
+                skills_required: a.skills_required ? (typeof a.skills_required === 'string' ? JSON.parse(a.skills_required) : a.skills_required) : null,
+                qualifications: a.qualifications ? (typeof a.qualifications === 'string' ? JSON.parse(a.qualifications) : a.qualifications) : null,
+                benefits: a.benefits ? (typeof a.benefits === 'string' ? JSON.parse(a.benefits) : a.benefits) : null,
+                raw_data: a.raw_data ? (typeof a.raw_data === 'string' ? JSON.parse(a.raw_data) : a.raw_data) : null,
+                analyzed_data: a.analyzed_data ? (typeof a.analyzed_data === 'string' ? JSON.parse(a.analyzed_data) : a.analyzed_data) : null
+            }));
+            
+            res.json({ 
+                success: true,
+                analyses: parsedAnalyses 
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Job Analysis Get Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.delete('/api/job-analyses/:jobAnalysisId', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { jobAnalysisId } = req.params;
+        
+        const connection = await pool.getConnection();
+        try {
+            const [result] = await connection.query(
+                'DELETE FROM job_analyses WHERE job_analysis_id = ? AND user_id = ?',
+                [jobAnalysisId, userId]
+            );
+            
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: 'Job analysis not found or access denied' });
+            }
+            
+            res.json({ 
+                success: true,
+                message: 'Job analysis deleted successfully' 
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Job Analysis Delete Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// CV File Processing endpoint
+app.post('/api/process-cv-file', validateApiKey, rateLimitMiddleware, upload.single('cvFile'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        const file = req.file;
+        const fileName = file.originalname;
+        const fileExtension = path.extname(fileName).toLowerCase();
+        let extractedText = '';
+        
+        try {
+            // Process based on file type
+            if (fileExtension === '.txt' || file.mimetype === 'text/plain') {
+                // Plain text file
+                extractedText = file.buffer.toString('utf-8');
+            } else if (fileExtension === '.docx' || 
+                      file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+                // DOCX file using mammoth
+                const result = await mammoth.extractRawText({ buffer: file.buffer });
+                extractedText = result.value;
+                
+                // Log warnings if any
+                if (result.messages && result.messages.length > 0) {
+                    const warnings = result.messages.filter(m => m.type === 'warning');
+                    if (warnings.length > 0) {
+                        console.log(`[CV Processing] DOCX warnings for ${fileName}:`, warnings.map(w => w.message));
+                    }
+                }
+            } else if (fileExtension === '.doc' || file.mimetype === 'application/msword') {
+                // DOC file (older format) - mammoth can handle some DOCX-like files
+                // Note: True .doc files (binary format) may not work perfectly
+                try {
+                    const result = await mammoth.extractRawText({ buffer: file.buffer });
+                    extractedText = result.value;
+                } catch (docError) {
+                    return res.status(400).json({ 
+                        error: 'DOC file format not fully supported. Please convert to DOCX or TXT format.',
+                        details: docError.message 
+                    });
+                }
+            } else if (fileExtension === '.pdf' || file.mimetype === 'application/pdf') {
+                // PDF file using pdf-parse
+                try {
+                    const pdfData = await pdfParse(file.buffer);
+                    extractedText = pdfData.text;
+                    
+                    // Log PDF metadata
+                    if (pdfData.info) {
+                        console.log(`[CV Processing] PDF metadata for ${fileName}:`, {
+                            title: pdfData.info.Title,
+                            author: pdfData.info.Author,
+                            pages: pdfData.numpages
+                        });
+                    }
+                } catch (pdfError) {
+                    return res.status(400).json({ 
+                        error: 'Failed to parse PDF file. Please ensure it is a valid PDF with extractable text.',
+                        details: pdfError.message 
+                    });
+                }
+            } else {
+                return res.status(400).json({ 
+                    error: `Unsupported file format: ${fileExtension}. Supported formats: TXT, DOCX, DOC, PDF` 
+                });
+            }
+            
+            // Clean up extracted text
+            extractedText = extractedText.replace(/\n{3,}/g, '\n\n').trim();
+            
+            if (!extractedText || extractedText.length < 10) {
+                return res.status(400).json({ 
+                    error: 'File appears to be empty or could not extract meaningful text. Please ensure the file contains readable text.' 
+                });
+            }
+            
+            // Structure CV using GPT (optional, but recommended for better suggestions)
+            let structuredCv = null;
+            try {
+                structuredCv = await structureCvWithGpt(extractedText, req.userId);
+                console.log('[CV Processing] ✓ CV structured into JSON object');
+            } catch (gptError) {
+                console.warn('[CV Processing] GPT structuring failed, returning raw text:', gptError.message);
+                // Continue with raw text if structuring fails
+            }
+            
+            res.json({
+                success: true,
+                fileName: fileName,
+                fileType: fileExtension,
+                content: extractedText,
+                structured: structuredCv, // Include structured CV object
+                characterCount: extractedText.length,
+                wordCount: extractedText.trim().split(/\s+/).filter(w => w.length > 0).length
+            });
+            
+        } catch (processingError) {
+            console.error('[CV Processing] Error processing file:', processingError);
+            res.status(500).json({ 
+                error: 'Failed to process file',
+                details: processingError.message 
+            });
+        }
+        
+    } catch (error) {
+        console.error('CV File Processing Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Generate Formatted CV endpoint (PDF or DOCX) with GPT structuring
+app.post('/api/generate-cv-file', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const { cvContent, structuredCv, useStructuredCv, format, jobTitle, fileName, useGptFormatting = true, aiEdits = [] } = req.body;
+        
+        // Prefer structured CV if provided
+        let finalStructuredCv = null;
+        if (useStructuredCv && structuredCv) {
+            finalStructuredCv = structuredCv;
+            console.log('[CV Generation] Using provided structured CV');
+        } else if (cvContent && cvContent.trim()) {
+            // Fallback to structuring from content if no structured CV provided
+            if (useGptFormatting && cvContent.length < 50000) {
+                try {
+                    finalStructuredCv = await structureCvWithGpt(cvContent, req.userId);
+                    console.log('[CV Generation] ✓ CV structured with GPT from content');
+                } catch (gptError) {
+                    console.warn('[CV Generation] GPT structuring failed:', gptError.message);
+                }
+            }
+        } else if (!structuredCv) {
+            return res.status(400).json({ error: 'CV content or structured CV is required' });
+        }
+        
+        if (!format || !['pdf', 'docx'].includes(format.toLowerCase())) {
+            return res.status(400).json({ error: 'Format must be either "pdf" or "docx"' });
+        }
+        
+        const safeJobTitle = (jobTitle || 'job').replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+        const timestamp = Date.now();
+        const defaultFileName = fileName || `optimized_cv_${safeJobTitle}_${timestamp}`;
+        
+        try {
+            // Use provided structured CV (preferred) or structure from content if needed
+            const structuredCv = finalStructuredCv;
+            const cvContentForFallback = cvContent || '';
+            
+            if (format.toLowerCase() === 'docx') {
+                // Generate DOCX file
+                const doc = new Document({
+                    sections: [{
+                        properties: {},
+                        children: structuredCv 
+                            ? formatStructuredCvForDocx(structuredCv, aiEdits)
+                            : formatCvContentForDocx(cvContentForFallback, aiEdits)
+                    }]
+                });
+                
+                // Generate buffer
+                const buffer = await Packer.toBuffer(doc);
+                
+                res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+                res.setHeader('Content-Disposition', `attachment; filename="${defaultFileName}.docx"`);
+                res.send(buffer);
+                
+            } else if (format.toLowerCase() === 'pdf') {
+                // Generate PDF file
+                const doc = new PDFDocument({
+                    margin: 50,
+                    size: 'LETTER'
+                });
+                
+                // Set response headers
+                res.setHeader('Content-Type', 'application/pdf');
+                res.setHeader('Content-Disposition', `attachment; filename="${defaultFileName}.pdf"`);
+                
+                // Pipe PDF to response
+                doc.pipe(res);
+                
+                // Format and add CV content
+                if (structuredCv) {
+                    formatStructuredCvForPdf(doc, structuredCv, aiEdits);
+                } else {
+                    formatCvContentForPdf(doc, cvContentForFallback, aiEdits);
+                }
+                
+                // Finalize PDF
+                doc.end();
+            }
+            
+        } catch (generationError) {
+            console.error('[CV Generation] Error generating file:', generationError);
+            res.status(500).json({ 
+                error: 'Failed to generate CV file',
+                details: generationError.message 
+            });
+        }
+        
+    } catch (error) {
+        console.error('CV Generation Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Helper function to structure CV using GPT
+async function structureCvWithGpt(cvContent, userId) {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    
+    const prompt = `You are an expert CV/resume parser. Parse the following CV content and structure it into a well-organized JSON format.
+
+CV CONTENT:
+${cvContent}
+
+Extract and organize the CV into the following structure:
+{
+  "personalInfo": {
+    "name": "Full Name",
+    "email": "email@example.com",
+    "phone": "phone number",
+    "location": "City, State/Country",
+    "linkedin": "LinkedIn URL",
+    "website": "Personal website"
+  },
+  "summary": "Professional summary or objective",
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "location": "City, State",
+      "startDate": "MM/YYYY or YYYY",
+      "endDate": "MM/YYYY, YYYY, or 'Present'",
+      "description": "Brief description",
+      "achievements": ["achievement 1", "achievement 2", ...]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree Name",
+      "school": "School/University Name",
+      "location": "City, State",
+      "graduationDate": "YYYY",
+      "gpa": "GPA if mentioned",
+      "honors": "Honors if any"
+    }
+  ],
+  "skills": {
+    "technical": ["skill1", "skill2", ...],
+    "soft": ["skill1", "skill2", ...],
+    "languages": ["language1", "language2", ...]
+  },
+  "projects": [
+    {
+      "name": "Project Name",
+      "description": "Project description",
+      "technologies": ["tech1", "tech2"],
+      "url": "Project URL if available"
+    }
+  ],
+  "certifications": [
+    {
+      "name": "Certification Name",
+      "issuer": "Issuing Organization",
+      "date": "Date",
+      "expiryDate": "Expiry if applicable"
+    }
+  ],
+  "awards": ["Award 1", "Award 2", ...],
+  "additionalSections": {
+    "sectionName": "content or array of items"
+  }
+}
+
+Return ONLY valid JSON. If a section is not present in the CV, use null or empty array/object.`;
+
+    try {
+        const completion = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+                { role: 'system', content: 'You are an expert CV/resume parser. Always respond with valid JSON only.' },
+                { role: 'user', content: prompt }
+            ],
+            temperature: 0.3,
+            max_tokens: 3000,
+            response_format: { type: 'json_object' }
+        });
+        
+        const responseText = completion.choices[0].message.content;
+        const structured = JSON.parse(responseText);
+        
+        return structured;
+    } catch (error) {
+        console.error('[CV Structuring] GPT error:', error);
+        throw error;
+    }
+}
+
+// Helper function to format structured CV data for DOCX
+function formatStructuredCvForDocx(structuredCv) {
+    const children = [];
+    
+    // Personal Info Header
+    if (structuredCv.personalInfo) {
+        const info = structuredCv.personalInfo;
+        const nameParts = [];
+        if (info.name) nameParts.push(new TextRun({ text: info.name, bold: true, size: 32 }));
+        
+        const contactInfo = [];
+        if (info.email) contactInfo.push(info.email);
+        if (info.phone) contactInfo.push(info.phone);
+        if (info.location) contactInfo.push(info.location);
+        if (info.linkedin) contactInfo.push(info.linkedin);
+        
+        children.push(new Paragraph({
+            children: nameParts,
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 100 }
+        }));
+        
+        if (contactInfo.length > 0) {
+            children.push(new Paragraph({
+                text: contactInfo.join(' | '),
+                alignment: AlignmentType.CENTER,
+                spacing: { after: 240 }
+            }));
+        }
+    }
+    
+    // Summary
+    if (structuredCv.summary) {
+        children.push(new Paragraph({
+            text: 'PROFESSIONAL SUMMARY',
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 240, after: 120 },
+            border: {
+                bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+            }
+        }));
+        children.push(new Paragraph({
+            text: structuredCv.summary,
+            spacing: { after: 240 }
+        }));
+    }
+    
+    // Experience
+    if (structuredCv.experience && structuredCv.experience.length > 0) {
+        children.push(new Paragraph({
+            text: 'PROFESSIONAL EXPERIENCE',
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 240, after: 180 },
+            border: {
+                bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+            }
+        }));
+        
+        structuredCv.experience.forEach(exp => {
+            const titleParts = [new TextRun({ text: exp.title || '', bold: true, size: 24 })];
+            if (exp.company) {
+                titleParts.push(new TextRun({ text: ` | ${exp.company}`, size: 24 }));
+            }
+            if (exp.location) {
+                titleParts.push(new TextRun({ text: ` | ${exp.location}`, italics: true, size: 22 }));
+            }
+            if (exp.startDate || exp.endDate) {
+                const dateRange = `${exp.startDate || ''} - ${exp.endDate || 'Present'}`;
+                titleParts.push(new TextRun({ text: ` | ${dateRange}`, size: 22 }));
+            }
+            
+            children.push(new Paragraph({
+                children: titleParts,
+                spacing: { after: 100 }
+            }));
+            
+            if (exp.description) {
+                children.push(new Paragraph({
+                    text: exp.description,
+                    spacing: { after: 80 }
+                }));
+            }
+            
+            if (exp.achievements && exp.achievements.length > 0) {
+                exp.achievements.forEach(achievement => {
+                    children.push(new Paragraph({
+                        text: achievement,
+                        bullet: { level: 0 },
+                        spacing: { after: 80 },
+                        indent: { left: 360 }
+                    }));
+                });
+            }
+            
+            children.push(new Paragraph({ text: '', spacing: { after: 120 } }));
+        });
+    }
+    
+    // Education
+    if (structuredCv.education && structuredCv.education.length > 0) {
+        children.push(new Paragraph({
+            text: 'EDUCATION',
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 240, after: 180 },
+            border: {
+                bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+            }
+        }));
+        
+        structuredCv.education.forEach(edu => {
+            const eduParts = [new TextRun({ text: edu.degree || '', bold: true, size: 24 })];
+            if (edu.school) {
+                eduParts.push(new TextRun({ text: ` | ${edu.school}`, size: 24 }));
+            }
+            if (edu.location) {
+                eduParts.push(new TextRun({ text: ` | ${edu.location}`, italics: true, size: 22 }));
+            }
+            if (edu.graduationDate) {
+                eduParts.push(new TextRun({ text: ` | ${edu.graduationDate}`, size: 22 }));
+            }
+            
+            children.push(new Paragraph({
+                children: eduParts,
+                spacing: { after: 100 }
+            }));
+            
+            if (edu.gpa || edu.honors) {
+                const details = [];
+                if (edu.gpa) details.push(`GPA: ${edu.gpa}`);
+                if (edu.honors) details.push(edu.honors);
+                children.push(new Paragraph({
+                    text: details.join(' | '),
+                    spacing: { after: 120 }
+                }));
+            }
+        });
+    }
+    
+    // Skills
+    if (structuredCv.skills) {
+        const skillSections = [];
+        if (structuredCv.skills.technical && structuredCv.skills.technical.length > 0) {
+            skillSections.push(`Technical: ${structuredCv.skills.technical.join(', ')}`);
+        }
+        if (structuredCv.skills.soft && structuredCv.skills.soft.length > 0) {
+            skillSections.push(`Soft Skills: ${structuredCv.skills.soft.join(', ')}`);
+        }
+        if (structuredCv.skills.languages && structuredCv.skills.languages.length > 0) {
+            skillSections.push(`Languages: ${structuredCv.skills.languages.join(', ')}`);
+        }
+        
+        if (skillSections.length > 0) {
+            children.push(new Paragraph({
+                text: 'SKILLS',
+                heading: HeadingLevel.HEADING_2,
+                spacing: { before: 240, after: 120 },
+                border: {
+                    bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+                }
+            }));
+            
+            skillSections.forEach(section => {
+                children.push(new Paragraph({
+                    text: section,
+                    spacing: { after: 80 }
+                }));
+            });
+        }
+    }
+    
+    // Projects
+    if (structuredCv.projects && structuredCv.projects.length > 0) {
+        children.push(new Paragraph({
+            text: 'PROJECTS',
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 240, after: 180 },
+            border: {
+                bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+            }
+        }));
+        
+        structuredCv.projects.forEach(project => {
+            const projParts = [new TextRun({ text: project.name || '', bold: true, size: 24 })];
+            if (project.technologies && project.technologies.length > 0) {
+                projParts.push(new TextRun({ text: ` | ${project.technologies.join(', ')}`, size: 22 }));
+            }
+            
+            children.push(new Paragraph({
+                children: projParts,
+                spacing: { after: 80 }
+            }));
+            
+            if (project.description) {
+                children.push(new Paragraph({
+                    text: project.description,
+                    spacing: { after: 120 }
+                }));
+            }
+        });
+    }
+    
+    // Certifications
+    if (structuredCv.certifications && structuredCv.certifications.length > 0) {
+        children.push(new Paragraph({
+            text: 'CERTIFICATIONS',
+            heading: HeadingLevel.HEADING_2,
+            spacing: { before: 240, after: 120 },
+            border: {
+                bottom: { color: "4472C4", size: 6, space: 1, value: "single" }
+            }
+        }));
+        
+        structuredCv.certifications.forEach(cert => {
+            const certText = `${cert.name}${cert.issuer ? ` | ${cert.issuer}` : ''}${cert.date ? ` | ${cert.date}` : ''}`;
+            children.push(new Paragraph({
+                text: certText,
+                spacing: { after: 80 }
+            }));
+        });
+    }
+    
+    return children.length > 0 ? children : [new Paragraph({ text: 'CV content' })];
+}
+
+// Helper function to check if text position is in AI edit range
+function isAiEdit(position, aiEdits) {
+    if (!aiEdits || aiEdits.length === 0) return false;
+    return aiEdits.some(edit => position >= edit.start && position <= edit.end);
+}
+
+// Helper function to format CV content for DOCX with better structure
+function formatCvContentForDocx(cvContent, aiEdits = []) {
+    // Preserve ALL lines including empty ones for proper spacing
+    const lines = cvContent.split('\n');
+    const children = [];
+    
+    let currentSection = null;
+    let inExperienceBlock = false;
+    let experienceItems = [];
+    
+    // Calculate character positions for AI edit detection
+    let charPosition = 0;
+    
+    // Parse CV into structured sections
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]; // Preserve original
+        const trimmedLine = line.trim();
+        const nextLine = i < lines.length - 1 ? lines[i + 1].trim() : '';
+        const lineStartPos = charPosition;
+        const lineEndPos = charPosition + line.length;
+        
+        // Handle empty lines - preserve as spacing
+        if (trimmedLine.length === 0) {
+            if (i > 0 && i < lines.length - 1 && children.length > 0) {
+                children.push(new Paragraph({ text: '', spacing: { after: 100 } }));
+            }
+            charPosition = lineEndPos + 1;
+            continue;
+        }
+        
+        // Detect section headers (use trimmed line for detection)
+        const isSectionHeader = (
+            trimmedLine === trimmedLine.toUpperCase() && trimmedLine.length < 50 && trimmedLine.length > 2 ||
+            trimmedLine.endsWith(':') && trimmedLine.length < 50 ||
+            /^(PROFESSIONAL|EXPERIENCE|WORK|EDUCATION|SKILLS|SUMMARY|OBJECTIVE|CONTACT|PROJECTS|CERTIFICATIONS|AWARDS|LANGUAGES|TECHNICAL|SUGGESTED)/i.test(trimmedLine)
+        );
+        
+        // Check if this line is part of an AI edit
+        const isAiEdited = isAiEdit(lineStartPos, aiEdits) || isAiEdit(lineEndPos, aiEdits);
+        
+        if (isSectionHeader) {
+            // Close any open experience block
+            if (inExperienceBlock && experienceItems.length > 0) {
+                children.push(...experienceItems);
+                experienceItems = [];
+                inExperienceBlock = false;
+            }
+            
+            // Add spacing before new section
+            if (children.length > 0) {
+                children.push(new Paragraph({ text: '' }));
+            }
+            
+            // Add section header with better styling
+            const headerText = trimmedLine.replace(':', '').trim();
+            children.push(new Paragraph({
+                text: headerText,
+                heading: HeadingLevel.HEADING_2,
+                spacing: { before: 240, after: 180 },
+                border: {
+                    bottom: {
+                        color: "4472C4",
+                        size: 6,
+                        space: 1,
+                        value: "single"
+                    }
+                }
+            }));
+            
+            currentSection = line;
+        } else {
+            // Detect job entries (pattern: Job Title | Company | Date or similar)
+            const isJobEntry = /^[A-Z][^|]+(\s*\|\s*[^|]+)+/.test(line) || 
+                             (/^[A-Z][^•]+$/.test(line) && line.length < 100 && nextLine && /^\d{4}|\w+\s+\d{4}/.test(nextLine));
+            
+            // Detect dates (for experience/education entries)
+            const hasDate = /\d{4}|\w+\s+\d{4}|Present|Current/i.test(line);
+            
+            // Check if it's a bullet point
+            const isBullet = /^[-•*]\s/.test(line) || /^\d+\.\s/.test(line);
+            const cleanLine = line.replace(/^[-•*]\s/, '').replace(/^\d+\.\s/, '');
+            
+            if (isJobEntry || (hasDate && !isBullet)) {
+                // Job title or position entry - make it bold
+                children.push(new Paragraph({
+                    children: [
+                        new TextRun({
+                            text: cleanLine,
+                            bold: true,
+                            size: 24 // 12pt
+                        })
+                    ],
+                    spacing: { after: 120 }
+                }));
+            } else if (isBullet) {
+                // Bullet point with proper formatting
+                children.push(new Paragraph({
+                    text: cleanLine,
+                    bullet: {
+                        level: 0
+                    },
+                    spacing: { after: 100 },
+                    indent: { left: 360 } // 0.25 inch indent
+                }));
+            } else {
+                // Regular text - check if it's a company name or location
+                const isCompanyOrLocation = line.length < 80 && (
+                    /^(at|@)/i.test(line) ||
+                    /^[A-Z][a-z]+\s+(Inc|LLC|Ltd|Corp|Company)/i.test(line) ||
+                    /,\s*[A-Z]{2}\s+\d{5}/.test(line) // Location pattern
+                );
+                
+                if (isCompanyOrLocation) {
+                    // Company or location - italic
+                    children.push(new Paragraph({
+                        children: [
+                            new TextRun({
+                                text: cleanLine,
+                                italics: true,
+                                size: 22 // 11pt
+                            })
+                        ],
+                        spacing: { after: 100 }
+                    }));
+            } else {
+                // Regular paragraph - highlight if AI-edited
+                if (isAiEdited) {
+                    children.push(new Paragraph({
+                        children: [
+                            new TextRun({
+                                text: cleanLine,
+                                highlight: "yellow",
+                                italics: true
+                            })
+                        ],
+                        spacing: { after: 100 }
+                    }));
+                } else {
+                    children.push(new Paragraph({
+                        text: cleanLine,
+                        spacing: { after: 100 }
+                    }));
+                }
+            }
+        }
+        
+        // Update character position (add 1 for newline)
+        charPosition = lineEndPos + 1;
+    }
+    
+    // Close any remaining experience block
+    if (experienceItems.length > 0) {
+        children.push(...experienceItems);
+    }
+    
+    return children.length > 0 ? children : [new Paragraph({ text: cvContent })];
+    }
+
+}
+
+// Helper function to format structured CV data for PDF
+function formatStructuredCvForPdf(doc, structuredCv, aiEdits = []) {
+    // Header with name
+    if (structuredCv.personalInfo && structuredCv.personalInfo.name) {
+        doc.fontSize(24)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text(structuredCv.personalInfo.name, { align: 'center' })
+           .fillColor('black')
+           .moveDown(0.3);
+        
+        // Contact info
+        const contactInfo = [];
+        if (structuredCv.personalInfo.email) contactInfo.push(structuredCv.personalInfo.email);
+        if (structuredCv.personalInfo.phone) contactInfo.push(structuredCv.personalInfo.phone);
+        if (structuredCv.personalInfo.location) contactInfo.push(structuredCv.personalInfo.location);
+        if (structuredCv.personalInfo.linkedin) contactInfo.push(structuredCv.personalInfo.linkedin);
+        
+        if (contactInfo.length > 0) {
+            doc.fontSize(10)
+               .font('Helvetica')
+               .text(contactInfo.join(' | '), { align: 'center' })
+               .moveDown(0.5);
+        }
+        
+        // Decorative line
+        doc.moveTo(50, doc.y)
+           .lineTo(550, doc.y)
+           .strokeColor('#0a66c2')
+           .lineWidth(2)
+           .stroke()
+           .moveDown(1);
+    }
+    
+    // Summary
+    if (structuredCv.summary) {
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('PROFESSIONAL SUMMARY', 60, doc.y, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.5);
+        
+        doc.fontSize(11)
+           .font('Helvetica')
+           .text(structuredCv.summary, { width: 500 })
+           .moveDown(1);
+    }
+    
+    // Experience
+    if (structuredCv.experience && structuredCv.experience.length > 0) {
+        // Section header
+        const headerY = doc.y;
+        doc.rect(50, headerY - 5, 500, 25)
+           .fillColor('#e8f0fe')
+           .fill()
+           .fillColor('black');
+        
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('PROFESSIONAL EXPERIENCE', 60, headerY, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.8);
+        
+        structuredCv.experience.forEach(exp => {
+            // Job title and company
+            const titleLine = `${exp.title || ''}${exp.company ? ` | ${exp.company}` : ''}${exp.location ? ` | ${exp.location}` : ''}`;
+            doc.fontSize(13)
+               .font('Helvetica-Bold')
+               .text(titleLine, { width: 500 })
+               .moveDown(0.2);
+            
+            // Date range
+            if (exp.startDate || exp.endDate) {
+                const dateRange = `${exp.startDate || ''} - ${exp.endDate || 'Present'}`;
+                doc.fontSize(10)
+                   .font('Helvetica-Oblique')
+                   .text(dateRange)
+                   .moveDown(0.3);
+            }
+            
+            // Description
+            if (exp.description) {
+                doc.fontSize(11)
+                   .font('Helvetica')
+                   .text(exp.description, { width: 500 })
+                   .moveDown(0.3);
+            }
+            
+            // Achievements
+            if (exp.achievements && exp.achievements.length > 0) {
+                exp.achievements.forEach(achievement => {
+                    doc.fontSize(11)
+                       .font('Helvetica')
+                       .text('•', 60)
+                       .text(achievement, 75, doc.y - 11, { width: 470 })
+                       .moveDown(0.4);
+                });
+            }
+            
+            doc.moveDown(0.5);
+        });
+    }
+    
+    // Education
+    if (structuredCv.education && structuredCv.education.length > 0) {
+        const headerY = doc.y;
+        doc.rect(50, headerY - 5, 500, 25)
+           .fillColor('#e8f0fe')
+           .fill()
+           .fillColor('black');
+        
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('EDUCATION', 60, headerY, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.8);
+        
+        structuredCv.education.forEach(edu => {
+            const eduLine = `${edu.degree || ''}${edu.school ? ` | ${edu.school}` : ''}${edu.location ? ` | ${edu.location}` : ''}${edu.graduationDate ? ` | ${edu.graduationDate}` : ''}`;
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text(eduLine, { width: 500 })
+               .moveDown(0.2);
+            
+            if (edu.gpa || edu.honors) {
+                const details = [];
+                if (edu.gpa) details.push(`GPA: ${edu.gpa}`);
+                if (edu.honors) details.push(edu.honors);
+                doc.fontSize(10)
+                   .font('Helvetica')
+                   .text(details.join(' | '))
+                   .moveDown(0.5);
+            }
+        });
+    }
+    
+    // Skills
+    if (structuredCv.skills) {
+        const headerY = doc.y;
+        doc.rect(50, headerY - 5, 500, 25)
+           .fillColor('#e8f0fe')
+           .fill()
+           .fillColor('black');
+        
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('SKILLS', 60, headerY, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.8);
+        
+        const skillLines = [];
+        if (structuredCv.skills.technical && structuredCv.skills.technical.length > 0) {
+            skillLines.push(`Technical: ${structuredCv.skills.technical.join(', ')}`);
+        }
+        if (structuredCv.skills.soft && structuredCv.skills.soft.length > 0) {
+            skillLines.push(`Soft Skills: ${structuredCv.skills.soft.join(', ')}`);
+        }
+        if (structuredCv.skills.languages && structuredCv.skills.languages.length > 0) {
+            skillLines.push(`Languages: ${structuredCv.skills.languages.join(', ')}`);
+        }
+        
+        skillLines.forEach(line => {
+            doc.fontSize(11)
+               .font('Helvetica')
+               .text(line, { width: 500 })
+               .moveDown(0.4);
+        });
+    }
+    
+    // Projects
+    if (structuredCv.projects && structuredCv.projects.length > 0) {
+        const headerY = doc.y;
+        doc.rect(50, headerY - 5, 500, 25)
+           .fillColor('#e8f0fe')
+           .fill()
+           .fillColor('black');
+        
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('PROJECTS', 60, headerY, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.8);
+        
+        structuredCv.projects.forEach(project => {
+            const projLine = `${project.name || ''}${project.technologies && project.technologies.length > 0 ? ` | ${project.technologies.join(', ')}` : ''}`;
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text(projLine, { width: 500 })
+               .moveDown(0.2);
+            
+            if (project.description) {
+                doc.fontSize(11)
+                   .font('Helvetica')
+                   .text(project.description, { width: 500 })
+                   .moveDown(0.5);
+            }
+        });
+    }
+    
+    // Certifications
+    if (structuredCv.certifications && structuredCv.certifications.length > 0) {
+        const headerY = doc.y;
+        doc.rect(50, headerY - 5, 500, 25)
+           .fillColor('#e8f0fe')
+           .fill()
+           .fillColor('black');
+        
+        doc.fontSize(14)
+           .font('Helvetica-Bold')
+           .fillColor('#0a66c2')
+           .text('CERTIFICATIONS', 60, headerY, { width: 480 })
+           .fillColor('black')
+           .moveDown(0.8);
+        
+        structuredCv.certifications.forEach(cert => {
+            const certText = `${cert.name}${cert.issuer ? ` | ${cert.issuer}` : ''}${cert.date ? ` | ${cert.date}` : ''}`;
+            doc.fontSize(11)
+               .font('Helvetica')
+               .text(certText, { width: 500 })
+               .moveDown(0.4);
+        });
+    }
+}
+
+// Helper function to format CV content for PDF with better structure
+function formatCvContentForPdf(doc, cvContent, aiEdits = []) {
+    // Preserve all lines, including empty ones that might be intentional spacing
+    const lines = cvContent.split('\n');
+    
+    // Add professional header with line
+    doc.fontSize(24)
+       .font('Helvetica-Bold')
+       .fillColor('#0a66c2') // LinkedIn blue
+       .text('CURRICULUM VITAE', { align: 'center' })
+       .fillColor('black')
+       .moveDown(0.5);
+    
+    // Add decorative line
+    doc.moveTo(50, doc.y)
+       .lineTo(550, doc.y)
+       .strokeColor('#0a66c2')
+       .lineWidth(2)
+       .stroke()
+       .moveDown(1);
+    
+    let currentSection = null;
+    let charPosition = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]; // Preserve original
+        const trimmedLine = line.trim();
+        const nextLine = i < lines.length - 1 ? lines[i + 1].trim() : '';
+        const lineStartPos = charPosition;
+        const lineEndPos = charPosition + line.length;
+        
+        // Handle empty lines - preserve as spacing
+        if (trimmedLine.length === 0) {
+            if (i > 0 && i < lines.length - 1) {
+                doc.moveDown(0.3);
+            }
+            charPosition = lineEndPos + 1;
+            continue;
+        }
+        
+        // Detect section headers (use trimmed line)
+        const isSectionHeader = (
+            trimmedLine === trimmedLine.toUpperCase() && trimmedLine.length < 50 && trimmedLine.length > 2 ||
+            trimmedLine.endsWith(':') && trimmedLine.length < 50 ||
+            /^(PROFESSIONAL|EXPERIENCE|WORK|EDUCATION|SKILLS|SUMMARY|OBJECTIVE|CONTACT|PROJECTS|CERTIFICATIONS|AWARDS|LANGUAGES|TECHNICAL|SUGGESTED)/i.test(trimmedLine)
+        );
+        
+        // Check if this line is part of an AI edit
+        const isAiEdited = isAiEdit(lineStartPos, aiEdits) || isAiEdit(lineEndPos, aiEdits);
+        
+        if (isSectionHeader) {
+            // Add spacing before new section
+            if (currentSection !== null) {
+                doc.moveDown(1);
+            }
+            
+            // Section header with background color
+            const headerText = trimmedLine.replace(':', '').trim();
+            const headerY = doc.y;
+            
+            // Draw background rectangle for section header
+            doc.rect(50, headerY - 5, 500, 25)
+               .fillColor('#e8f0fe')
+               .fill()
+               .fillColor('black');
+            
+            // Section header text
+            doc.fontSize(14)
+               .font('Helvetica-Bold')
+               .fillColor(isAiEdited ? '#ffc107' : '#0a66c2')
+               .text(headerText + (isAiEdited ? ' [AI]' : ''), 60, headerY, { width: 480 })
+               .fillColor('black')
+               .moveDown(0.8);
+            
+            currentSection = line;
+        } else {
+            // Detect job entries (use trimmed line)
+            const isJobEntry = /^[A-Z][^|]+(\s*\|\s*[^|]+)+/.test(trimmedLine) || 
+                             (/^[A-Z][^•]+$/.test(trimmedLine) && trimmedLine.length < 100 && nextLine && /^\d{4}|\w+\s+\d{4}/.test(nextLine));
+            
+            // Detect dates (use trimmed line)
+            const hasDate = /\d{4}|\w+\s+\d{4}|Present|Current/i.test(trimmedLine);
+            
+            // Check if it's a bullet point (use trimmed line)
+            const isBullet = /^[-•*]\s/.test(trimmedLine) || /^\d+\.\s/.test(trimmedLine);
+            const cleanLine = trimmedLine.replace(/^[-•*]\s/, '').replace(/^\d+\.\s/, '');
+            
+            if (isJobEntry || (hasDate && !isBullet && trimmedLine.length < 100)) {
+                // Job title or position - bold and slightly larger
+                doc.fontSize(13)
+                   .font('Helvetica-Bold')
+                   .text(cleanLine, { continued: false })
+                   .moveDown(0.3);
+            } else if (isBullet) {
+                // Bullet point with proper indentation
+                doc.fontSize(11)
+                   .font('Helvetica')
+                   .text('•', 60)
+                   .text(cleanLine, 75, doc.y - 11, { width: 470 })
+                   .moveDown(0.4);
+            } else {
+                // Check if it's a company name or location
+                const isCompanyOrLocation = trimmedLine.length < 80 && (
+                    /^(at|@)/i.test(trimmedLine) ||
+                    /^[A-Z][a-z]+\s+(Inc|LLC|Ltd|Corp|Company)/i.test(trimmedLine) ||
+                    /,\s*[A-Z]{2}\s+\d{5}/.test(trimmedLine)
+                );
+                
+                if (isCompanyOrLocation) {
+                    // Company or location - italic
+                    doc.fontSize(11)
+                       .font('Helvetica-Oblique')
+                       .text(cleanLine)
+                       .moveDown(0.3);
+                } else {
+                    // Regular text - highlight if AI-edited
+                    doc.fontSize(11)
+                       .font(isAiEdited ? 'Helvetica-Oblique' : 'Helvetica')
+                       .fillColor(isAiEdited ? '#ffc107' : 'black');
+                    
+                    if (isAiEdited) {
+                        // Draw highlight background
+                        const textY = doc.y;
+                        doc.save();
+                        doc.rect(50, textY - 2, 500, 13)
+                           .fillColor('#fff3cd')
+                           .fill();
+                        doc.restore();
+                    }
+                    
+                    doc.text(cleanLine, { align: 'left', width: 500 })
+                       .fillColor('black')
+                       .moveDown(0.4);
+                }
+            }
+        }
+        
+        // Update character position (add 1 for newline)
+        charPosition = lineEndPos + 1;
+    }
+}
 
 // Generated Content endpoints
 app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (req, res) => {
