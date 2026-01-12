@@ -7,7 +7,7 @@ USE linkedin_sales_copilot;
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     user_id VARCHAR(255) PRIMARY KEY,
-    balance INT NOT NULL DEFAULT 10000,
+    balance INT NOT NULL DEFAULT 200000,
     used INT NOT NULL DEFAULT 0,
     name VARCHAR(255),
     linkedin_profile_url VARCHAR(500),

@@ -168,7 +168,7 @@ pool.getConnection()
 
 // Credit configuration
 const CREDIT_CONFIG = {
-    FREE_TOKENS: parseInt(process.env.FREE_TOKENS) || 10000,
+    FREE_TOKENS: parseInt(process.env.FREE_TOKENS) || 200000,
     TOKEN_COST_PER_1M: {
         input: parseFloat(process.env.TOKEN_COST_PER_1M_INPUT) || 0.15,
         output: parseFloat(process.env.TOKEN_COST_PER_1M_OUTPUT) || 0.60
