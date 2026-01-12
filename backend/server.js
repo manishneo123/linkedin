@@ -192,21 +192,21 @@ if (!PRICING_PACKAGES) {
         { 
             id: 0, 
             name: process.env.PKG_0_NAME || 'Starter', 
-            tokens: parseInt(process.env.PKG_0_TOKENS) || 100000, 
+            tokens: parseInt(process.env.PKG_0_TOKENS) || 1000000, 
             price_usd: parseFloat(process.env.PKG_0_PRICE_USD) || 9.99,
             price_inr: parseFloat(process.env.PKG_0_PRICE_INR) || 799
         },
         { 
             id: 1, 
             name: process.env.PKG_1_NAME || 'Professional', 
-            tokens: parseInt(process.env.PKG_1_TOKENS) || 500000, 
+            tokens: parseInt(process.env.PKG_1_TOKENS) || 5000000, 
             price_usd: parseFloat(process.env.PKG_1_PRICE_USD) || 39.99,
             price_inr: parseFloat(process.env.PKG_1_PRICE_INR) || 3199
         },
         { 
             id: 2, 
             name: process.env.PKG_2_NAME || 'Enterprise', 
-            tokens: parseInt(process.env.PKG_2_TOKENS) || 2000000, 
+            tokens: parseInt(process.env.PKG_2_TOKENS) || 20000000, 
             price_usd: parseFloat(process.env.PKG_2_PRICE_USD) || 149.99,
             price_inr: parseFloat(process.env.PKG_2_PRICE_INR) || 11999
         }
