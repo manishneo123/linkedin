@@ -624,6 +624,7 @@ async function initializeDatabase() {
                 strategy TEXT,
                 tips JSON,
                 hashtags JSON,
+                image_url VARCHAR(1000),
                 metadata JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -2496,6 +2497,95 @@ function formatCvContentForPdf(doc, cvContent, aiEdits = []) {
     }
 }
 
+// Image Generation endpoint (DALL-E)
+app.post('/api/generate-image', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    const connection = await pool.getConnection();
+    
+    try {
+        await connection.beginTransaction();
+        
+        const userId = req.userId;
+        const user = await initializeUser(userId);
+        
+        const { prompt, size = '1024x1024', model = 'dall-e-3' } = req.body;
+        
+        if (!prompt) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ error: 'Prompt is required' });
+        }
+        
+        // DALL-E 3 costs: $0.040 per image (1024x1024)
+        // Using credit system: 1 credit = $0.000001, so 1 image = 40,000 credits
+        const imageCost = 40000; // credits per image
+        
+        // Check if user has enough credits
+        if (user.balance - user.used < imageCost) {
+            await connection.rollback();
+            connection.release();
+            return res.status(402).json({
+                error: `INSUFFICIENT_CREDITS. You have ${user.balance - user.used} credits left. You need ${imageCost} credits for image generation.`,
+                remaining: user.balance - user.used,
+                needed: imageCost
+            });
+        }
+        
+        // Make DALL-E API call
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const imageResponse = await openai.images.generate({
+            model: model,
+            prompt: prompt,
+            size: size,
+            quality: 'standard',
+            n: 1
+        });
+        
+        const imageUrl = imageResponse.data[0].url;
+        
+        if (!imageUrl) {
+            await connection.rollback();
+            connection.release();
+            return res.status(500).json({ error: 'Failed to generate image' });
+        }
+        
+        // Deduct credits
+        await connection.query(
+            `UPDATE users SET used = used + ? WHERE user_id = ?`,
+            [imageCost, userId]
+        );
+        
+        // Log the usage
+        await connection.query(
+            `INSERT INTO usage_logs (log_id, user_id, service_type, tokens_used, cost_credits, model_used, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                uuidv4(),
+                userId,
+                'image_generation',
+                0, // No tokens for images
+                imageCost,
+                model,
+                JSON.stringify({ prompt: prompt.substring(0, 200), size: size })
+            ]
+        );
+        
+        await connection.commit();
+        connection.release();
+        
+        res.json({
+            success: true,
+            imageUrl: imageUrl,
+            creditsUsed: imageCost
+        });
+        
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Image Generation Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Generated Content endpoints
 app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
@@ -2509,6 +2599,7 @@ app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (r
             strategy,
             tips,
             hashtags,
+            imageUrl,
             metadata
         } = req.body;
         
@@ -2522,8 +2613,8 @@ app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (r
             
             await connection.query(
                 `INSERT INTO generated_content (
-                    content_id, user_id, content_type, topic, tone, content, title, strategy, tips, hashtags, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    content_id, user_id, content_type, topic, tone, content, title, strategy, tips, hashtags, image_url, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     contentId,
                     userId,
@@ -2535,6 +2626,7 @@ app.post('/api/generated-content', validateApiKey, rateLimitMiddleware, async (r
                     strategy || null,
                     tips ? JSON.stringify(tips) : null,
                     hashtags ? JSON.stringify(hashtags) : null,
+                    imageUrl || null,
                     metadata ? JSON.stringify(metadata) : null
                 ]
             );

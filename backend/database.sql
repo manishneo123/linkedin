@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS generated_content (
     strategy TEXT,
     tips JSON,
     hashtags JSON,
+    image_url VARCHAR(1000),
     metadata JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
