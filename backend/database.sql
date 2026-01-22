@@ -161,3 +161,77 @@ CREATE TABLE IF NOT EXISTS content_analyses (
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Job Analyses table (for storing LinkedIn job posting analyses)
+CREATE TABLE IF NOT EXISTS job_analyses (
+    job_analysis_id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    job_url VARCHAR(500) NOT NULL,
+    job_title VARCHAR(500),
+    company_name VARCHAR(255),
+    location VARCHAR(255),
+    employment_type VARCHAR(100),
+    seniority_level VARCHAR(100),
+    job_function VARCHAR(255),
+    industries JSON,
+    description TEXT,
+    requirements TEXT,
+    responsibilities TEXT,
+    skills_required JSON,
+    qualifications JSON,
+    benefits JSON,
+    salary_range VARCHAR(255),
+    posted_date VARCHAR(100),
+    applicants_count VARCHAR(100),
+    raw_data JSON,
+    analyzed_data JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_job_url (job_url),
+    INDEX idx_company_name (company_name),
+    INDEX idx_job_title (job_title),
+    INDEX idx_created_at (created_at),
+    UNIQUE KEY unique_user_job (user_id, job_url)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Interview Question Sets table (for grouping questions for a job)
+CREATE TABLE IF NOT EXISTS interview_question_sets (
+    set_id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    job_analysis_id VARCHAR(255) NOT NULL,
+    set_name VARCHAR(255),
+    total_questions INT,
+    categories_included JSON,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (job_analysis_id) REFERENCES job_analyses(job_analysis_id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_job_analysis_id (job_analysis_id),
+    INDEX idx_generated_at (generated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Interview Questions table (for storing individual questions)
+CREATE TABLE IF NOT EXISTS interview_questions (
+    question_id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    job_analysis_id VARCHAR(255) NOT NULL,
+    set_id VARCHAR(255),
+    question_text TEXT NOT NULL,
+    question_category VARCHAR(100) NOT NULL,
+    difficulty_level VARCHAR(50),
+    suggested_answer TEXT,
+    best_answer TEXT,
+    tips TEXT,
+    related_skills JSON,
+    question_order INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (job_analysis_id) REFERENCES job_analyses(job_analysis_id) ON DELETE CASCADE,
+    FOREIGN KEY (set_id) REFERENCES interview_question_sets(set_id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_job_analysis_id (job_analysis_id),
+    INDEX idx_set_id (set_id),
+    INDEX idx_category (question_category)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

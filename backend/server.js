@@ -670,6 +670,51 @@ async function initializeDatabase() {
             )
         `);
         
+        // Create interview_question_sets table
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS interview_question_sets (
+                set_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                job_analysis_id VARCHAR(255) NOT NULL,
+                set_name VARCHAR(255),
+                total_questions INT,
+                categories_included JSON,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (job_analysis_id) REFERENCES job_analyses(job_analysis_id) ON DELETE CASCADE,
+                INDEX idx_user_id (user_id),
+                INDEX idx_job_analysis_id (job_analysis_id),
+                INDEX idx_generated_at (generated_at)
+            )
+        `);
+        
+        // Create interview_questions table
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS interview_questions (
+                question_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                job_analysis_id VARCHAR(255) NOT NULL,
+                set_id VARCHAR(255),
+                question_text TEXT NOT NULL,
+                question_category VARCHAR(100) NOT NULL,
+                difficulty_level VARCHAR(50),
+                suggested_answer TEXT,
+                best_answer TEXT,
+                tips TEXT,
+                related_skills JSON,
+                question_order INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (job_analysis_id) REFERENCES job_analyses(job_analysis_id) ON DELETE CASCADE,
+                FOREIGN KEY (set_id) REFERENCES interview_question_sets(set_id) ON DELETE CASCADE,
+                INDEX idx_user_id (user_id),
+                INDEX idx_job_analysis_id (job_analysis_id),
+                INDEX idx_set_id (set_id),
+                INDEX idx_category (question_category)
+            )
+        `);
+        
         connection.release();
         console.log('Database initialized successfully');
     } catch (error) {
@@ -1435,6 +1480,393 @@ app.delete('/api/job-analyses/:jobAnalysisId', validateApiKey, rateLimitMiddlewa
         }
     } catch (error) {
         console.error('Job Analysis Delete Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Interview Questions endpoints
+// Generate interview questions
+app.post('/api/interview-questions/generate', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    const connection = await pool.getConnection();
+    
+    try {
+        await connection.beginTransaction();
+        
+        const userId = req.userId;
+        const {
+            jobAnalysisId,
+            cvData,
+            cvStructured,
+            questionTypes = ['technical', 'behavioral', 'company_culture', 'role_specific'],
+            numberOfQuestions = 15,
+            difficultyLevel = 'mixed'
+        } = req.body;
+        
+        if (!jobAnalysisId) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ error: 'Job analysis ID is required' });
+        }
+        
+        // Get job analysis data
+        const [jobAnalyses] = await connection.query(
+            'SELECT * FROM job_analyses WHERE job_analysis_id = ? AND user_id = ?',
+            [jobAnalysisId, userId]
+        );
+        
+        if (jobAnalyses.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ error: 'Job analysis not found' });
+        }
+        
+        const jobData = jobAnalyses[0];
+        const jobTitle = jobData.job_title || 'the position';
+        const companyName = jobData.company_name || 'the company';
+        const location = jobData.location || '';
+        const seniorityLevel = jobData.seniority_level || '';
+        const jobFunction = jobData.job_function || '';
+        const jobDescription = jobData.description || '';
+        const requirements = jobData.requirements || '';
+        const responsibilities = jobData.responsibilities || '';
+        const skillsRequired = jobData.skills_required ? 
+            (typeof jobData.skills_required === 'string' ? JSON.parse(jobData.skills_required) : jobData.skills_required) : [];
+        const qualifications = jobData.qualifications ? 
+            (typeof jobData.qualifications === 'string' ? JSON.parse(jobData.qualifications) : jobData.qualifications) : null;
+        
+        // Build prompt for interview questions
+        let cvContext = '';
+        if (cvData || cvStructured) {
+            if (cvStructured && typeof cvStructured === 'object') {
+                cvContext = `CANDIDATE PROFILE (Structured):
+Name: ${cvStructured.personalInfo?.name || 'N/A'}
+Summary: ${cvStructured.summary || 'N/A'}
+Experience: ${JSON.stringify(cvStructured.experience || [])}
+Education: ${JSON.stringify(cvStructured.education || [])}
+Skills: ${JSON.stringify(cvStructured.skills || {})}
+Projects: ${JSON.stringify(cvStructured.projects || [])}
+Certifications: ${JSON.stringify(cvStructured.certifications || [])}`;
+            } else {
+                cvContext = `CANDIDATE PROFILE:
+${cvData}`;
+            }
+        }
+        
+        const interviewQuestionsPrompt = `You are an expert interview coach and recruiter. Generate comprehensive interview questions for a candidate preparing for a job interview.
+
+JOB INFORMATION:
+Title: ${jobTitle}
+Company: ${companyName}
+Location: ${location}
+Seniority Level: ${seniorityLevel}
+Job Function: ${jobFunction}
+
+JOB DESCRIPTION:
+${jobDescription}
+
+JOB REQUIREMENTS:
+${requirements}
+
+JOB RESPONSIBILITIES:
+${responsibilities}
+
+REQUIRED SKILLS:
+${Array.isArray(skillsRequired) ? skillsRequired.join(', ') : 'N/A'}
+
+QUALIFICATIONS:
+${qualifications ? JSON.stringify(qualifications) : 'N/A'}
+
+${cvContext ? cvContext + '\n\n' : ''}
+
+Generate ${numberOfQuestions} interview questions covering the following categories: ${questionTypes.join(', ')}.
+
+For each question, provide:
+1. The question text (clear and specific)
+2. Category classification (one of: technical, behavioral, company_culture, role_specific, cross_relevant)
+3. Difficulty level (easy, medium, or hard) - ${difficultyLevel === 'mixed' ? 'mix the difficulty levels' : `use ${difficultyLevel} difficulty`}
+4. A suggested answer framework based on the candidate's profile (if provided) or general best practices
+5. A best possible answer - a complete, well-structured answer that demonstrates expertise and aligns with the job requirements. This should be a full answer, not just a framework.
+6. Tips for answering effectively
+7. Related skills being tested
+
+Format your response as JSON with this exact structure:
+{
+  "questions": [
+    {
+      "questionText": "string",
+      "category": "technical|behavioral|company_culture|role_specific|cross_relevant",
+      "difficultyLevel": "easy|medium|hard",
+      "suggestedAnswer": "Framework or key points for answering",
+      "bestAnswer": "Complete, well-structured answer demonstrating expertise (2-4 paragraphs)",
+      "tips": "Specific tips for this question",
+      "relatedSkills": ["skill1", "skill2"]
+    }
+  ],
+  "summary": {
+    "totalQuestions": ${numberOfQuestions},
+    "categories": ${JSON.stringify(questionTypes)},
+    "focusAreas": ["area1", "area2"]
+  }
+}
+
+Guidelines:
+- Technical questions should test skills mentioned in job requirements
+- Behavioral questions should use STAR method framework
+- Company culture questions should reflect the company's values and industry
+- Role-specific questions should be tailored to the exact job responsibilities
+- Cross-relevant questions should connect candidate's experience to the role
+- If candidate profile is provided, personalize questions to their background
+- Vary difficulty levels appropriately
+- Include both common and unique questions
+- Make questions specific to this role, not generic`;
+
+        // Use OpenAI to generate questions
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const model = 'gpt-4o-mini';
+        
+        const completion = await openai.chat.completions.create({
+            model: model,
+            messages: [
+                { role: 'system', content: 'You are an expert interview coach. Generate interview questions in valid JSON format only.' },
+                { role: 'user', content: interviewQuestionsPrompt }
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.7,
+            max_tokens: 4000
+        });
+        
+        const responseText = completion.choices[0].message.content;
+        let questionsData;
+        
+        try {
+            questionsData = JSON.parse(responseText);
+        } catch (parseError) {
+            // Try to extract JSON from response
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                questionsData = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('Failed to parse AI response as JSON');
+            }
+        }
+        
+        if (!questionsData.questions || !Array.isArray(questionsData.questions)) {
+            throw new Error('Invalid response format from AI');
+        }
+        
+        // Calculate cost (using same pricing as other GPT calls)
+        const inputTokens = completion.usage.prompt_tokens;
+        const outputTokens = completion.usage.completion_tokens;
+        const totalTokens = inputTokens + outputTokens;
+        
+        // Pricing for gpt-4o-mini: $0.15/$0.60 per 1M tokens
+        const inputCost = (inputTokens / 1000000) * 0.15;
+        const outputCost = (outputTokens / 1000000) * 0.60;
+        const totalCost = inputCost + outputCost;
+        const costCredits = Math.ceil(totalCost * 1000000); // Convert to credits (1 credit = $0.000001)
+        
+        // Create question set
+        const setId = uuidv4();
+        const setName = `Interview Questions - ${jobTitle} at ${companyName}`;
+        
+        await connection.query(
+            `INSERT INTO interview_question_sets (
+                set_id, user_id, job_analysis_id, set_name, total_questions, categories_included
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+                setId,
+                userId,
+                jobAnalysisId,
+                setName,
+                questionsData.questions.length,
+                JSON.stringify(questionTypes)
+            ]
+        );
+        
+        // Save individual questions
+        const questionInserts = questionsData.questions.map((q, index) => [
+            uuidv4(),
+            userId,
+            jobAnalysisId,
+            setId,
+            q.questionText,
+            q.category,
+            q.difficultyLevel || difficultyLevel,
+            q.suggestedAnswer || '',
+            q.bestAnswer || '',
+            q.tips || '',
+            JSON.stringify(q.relatedSkills || []),
+            index + 1
+        ]);
+        
+        for (const questionData of questionInserts) {
+            await connection.query(
+                `INSERT INTO interview_questions (
+                    question_id, user_id, job_analysis_id, set_id, question_text,
+                    question_category, difficulty_level, suggested_answer, best_answer, tips,
+                    related_skills, question_order
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                questionData
+            );
+        }
+        
+        // Deduct credits
+        await connection.query(
+            `UPDATE users SET used = used + ? WHERE user_id = ?`,
+            [costCredits, userId]
+        );
+        
+        // Log usage
+        await connection.query(
+            `INSERT INTO usage_logs (log_id, user_id, service_type, tokens_used, cost_credits, model_used, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                uuidv4(),
+                userId,
+                'interview_questions_generation',
+                totalTokens,
+                costCredits,
+                model,
+                JSON.stringify({ 
+                    jobAnalysisId, 
+                    numberOfQuestions: questionsData.questions.length,
+                    categories: questionTypes 
+                })
+            ]
+        );
+        
+        await connection.commit();
+        connection.release();
+        
+        res.json({
+            success: true,
+            setId: setId,
+            questions: questionsData.questions,
+            summary: questionsData.summary || {
+                totalQuestions: questionsData.questions.length,
+                categories: questionTypes
+            },
+            creditsUsed: costCredits
+        });
+        
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Interview Questions Generation Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get interview questions for a job analysis
+app.get('/api/interview-questions/:jobAnalysisId', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { jobAnalysisId } = req.params;
+        const { setId } = req.query;
+        
+        const connection = await pool.getConnection();
+        try {
+            let query = `
+                SELECT 
+                    q.question_id, q.set_id, q.question_text, q.question_category,
+                    q.difficulty_level, q.suggested_answer, q.best_answer, q.tips, q.related_skills,
+                    q.question_order, q.created_at,
+                    s.set_name, s.total_questions, s.categories_included, s.generated_at
+                FROM interview_questions q
+                LEFT JOIN interview_question_sets s ON q.set_id = s.set_id
+                WHERE q.user_id = ? AND q.job_analysis_id = ?
+            `;
+            const params = [userId, jobAnalysisId];
+            
+            if (setId) {
+                query += ' AND q.set_id = ?';
+                params.push(setId);
+            }
+            
+            query += ' ORDER BY q.set_id DESC, q.question_order ASC';
+            
+            const [questions] = await connection.query(query, params);
+            
+            // Parse JSON fields
+            const parsedQuestions = questions.map(q => ({
+                ...q,
+                related_skills: q.related_skills ? (typeof q.related_skills === 'string' ? JSON.parse(q.related_skills) : q.related_skills) : [],
+                categories_included: q.categories_included ? (typeof q.categories_included === 'string' ? JSON.parse(q.categories_included) : q.categories_included) : null
+            }));
+            
+            // Group by set_id
+            const groupedBySet = {};
+            parsedQuestions.forEach(q => {
+                if (!groupedBySet[q.set_id]) {
+                    groupedBySet[q.set_id] = {
+                        setId: q.set_id,
+                        setName: q.set_name,
+                        totalQuestions: q.total_questions,
+                        categoriesIncluded: q.categories_included,
+                        generatedAt: q.generated_at,
+                        questions: []
+                    };
+                }
+                groupedBySet[q.set_id].questions.push({
+                    questionId: q.question_id,
+                    questionText: q.question_text,
+                    category: q.question_category,
+                    difficultyLevel: q.difficulty_level,
+                    suggestedAnswer: q.suggested_answer,
+                    bestAnswer: q.best_answer,
+                    tips: q.tips,
+                    relatedSkills: q.related_skills,
+                    questionOrder: q.question_order,
+                    createdAt: q.created_at
+                });
+            });
+            
+            res.json({
+                success: true,
+                sets: Object.values(groupedBySet)
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Get Interview Questions Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete interview question set
+app.delete('/api/interview-questions/set/:setId', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { setId } = req.params;
+        
+        const connection = await pool.getConnection();
+        try {
+            // Delete questions first (due to foreign key)
+            await connection.query(
+                'DELETE FROM interview_questions WHERE set_id = ? AND user_id = ?',
+                [setId, userId]
+            );
+            
+            // Delete set
+            const [result] = await connection.query(
+                'DELETE FROM interview_question_sets WHERE set_id = ? AND user_id = ?',
+                [setId, userId]
+            );
+            
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: 'Question set not found or access denied' });
+            }
+            
+            res.json({
+                success: true,
+                message: 'Question set deleted successfully'
+            });
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Delete Interview Questions Error:', error);
         res.status(500).json({ error: error.message });
     }
 });
