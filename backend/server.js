@@ -1266,6 +1266,244 @@ app.delete('/api/content-analyses/:analysisId', validateApiKey, rateLimitMiddlew
     }
 });
 
+// Post comment suggestion: analyze one or more posts and suggest whether/how to comment (protected)
+// Accepts posts (array), optional single post (legacy), and optional rawPageExcerpt. Uses AI to extract multiple posts from excerpt when needed.
+app.post('/api/post-comment-suggestion', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const userId = req.userId;
+        const user = await initializeUser(userId);
+
+        const { posts: postsInput, post: postInput, profile, rawPageExcerpt: rawPageExcerptInput } = req.body;
+
+        let posts = Array.isArray(postsInput) ? postsInput : [];
+        if (posts.length === 0 && postInput && typeof postInput === 'object' && postInput.text && String(postInput.text).trim().length >= 20) {
+            posts = [postInput];
+        }
+        const rawPageExcerpt = (rawPageExcerptInput && String(rawPageExcerptInput).trim()) || '';
+
+        // Normalize posts: keep only those with enough text, cap count
+        const MAX_POSTS = 12;
+        posts = posts
+            .filter(p => p && typeof p === 'object' && p.text && String(p.text).trim().length >= 20)
+            .map(p => ({
+                text: String(p.text).trim().substring(0, 8000),
+                author: (p.author && String(p.author).trim()) || 'Unknown',
+                authorHeadline: (p.authorHeadline && String(p.authorHeadline).trim()) || '',
+                url: (p.url && String(p.url).trim()) || ''
+            }))
+            .slice(0, MAX_POSTS);
+
+        // If no posts but we have raw page excerpt, use AI to extract multiple posts
+        if (posts.length === 0 && rawPageExcerpt.length > 50) {
+            const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+            const extractModel = 'gpt-4o-mini';
+            const extractPrompt = `You are given raw text from a LinkedIn feed or post page. Extract ALL distinct posts visible in the excerpt. For each post return: the post body text (what people read and comment on), and if visible the author name and headline.
+
+Return only valid JSON in this exact shape (no markdown, no extra text):
+{
+  "posts": [
+    { "text": "Full post body text for first post", "author": "Name if visible else empty string", "authorHeadline": "Headline if visible else empty string" },
+    { "text": "Full post body for second post", "author": "", "authorHeadline": "" }
+  ]
+}
+Include every distinct post you can identify (up to 12). Order by appearance in the excerpt. Each "text" must be the full post content, not a summary.`;
+
+            const excerptForPrompt = rawPageExcerpt.substring(0, 14000);
+            const extractEstInput = Math.ceil((extractPrompt.length + excerptForPrompt.length) / 4);
+            const extractEstOutput = 2000;
+            const extractCost = calculateCost(extractEstInput, extractEstOutput);
+            const extractTokensNeeded = Math.ceil(extractCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+            if (user.balance - user.used < extractTokensNeeded) {
+                await connection.rollback();
+                connection.release();
+                return res.status(402).json({
+                    error: 'INSUFFICIENT_CREDITS',
+                    remaining: user.balance - user.used,
+                    needed: extractTokensNeeded
+                });
+            }
+            const extractCompletion = await openai.chat.completions.create({
+                model: extractModel,
+                messages: [
+                    { role: 'system', content: extractPrompt },
+                    { role: 'user', content: excerptForPrompt }
+                ],
+                response_format: { type: 'json_object' },
+                max_tokens: 4000
+            });
+            const extractRaw = extractCompletion.choices?.[0]?.message?.content?.trim() || '{}';
+            let extracted;
+            try {
+                extracted = JSON.parse(extractRaw);
+            } catch (e) {
+                extracted = {};
+            }
+            const extractedPosts = Array.isArray(extracted.posts) ? extracted.posts : [];
+            for (const p of extractedPosts) {
+                if (p && p.text && String(p.text).trim().length >= 20) {
+                    posts.push({
+                        text: String(p.text).trim().substring(0, 8000),
+                        author: (p.author && String(p.author).trim()) || 'Unknown',
+                        authorHeadline: (p.authorHeadline && String(p.authorHeadline).trim()) || '',
+                        url: ''
+                    });
+                    if (posts.length >= MAX_POSTS) break;
+                }
+            }
+            const extInput = extractCompletion.usage?.prompt_tokens || extractEstInput;
+            const extOutput = extractCompletion.usage?.completion_tokens || extractEstOutput;
+            const extCost = calculateCost(extInput, extOutput);
+            const extTokensUsed = Math.ceil(extCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+            await connection.query('UPDATE users SET used = used + ? WHERE user_id = ?', [extTokensUsed, userId]);
+            const extTxnId = uuidv4();
+            await connection.query(
+                `INSERT INTO transactions (transaction_id, user_id, prospect_id, process_type, process_description, tokens_used, input_tokens, output_tokens, cost, model) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+                [extTxnId, userId, 'post_extract_from_page', 'Extract posts from page text', extTokensUsed, extInput, extOutput, extCost, extractModel]
+            );
+            const [updatedAfterExtract] = await connection.query('SELECT balance, used FROM users WHERE user_id = ?', [userId]);
+            user.used = updatedAfterExtract[0].used;
+        }
+
+        if (posts.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({
+                error: rawPageExcerpt.length > 50
+                    ? 'Could not extract posts from the page. Try scrolling so posts are visible and try again.'
+                    : 'No posts found. Open a LinkedIn feed or post page and try again.'
+            });
+        }
+
+        const sellerGoal = (profile && profile.sellerGoal) ? String(profile.sellerGoal).trim() : '';
+        const sellerOffer = (profile && profile.sellerOffer) ? String(profile.sellerOffer).trim() : '';
+        const sellerIcp = (profile && profile.sellerIcp) ? String(profile.sellerIcp).trim() : '';
+        const sellerProof = (profile && profile.sellerProof) ? String(profile.sellerProof).trim() : '';
+
+        const systemPrompt = `You are a sales and LinkedIn engagement expert. You will analyze a list of LinkedIn posts and the commenter's (seller's) profile. For EACH post you must:
+1. Briefly summarize what the post is about and its tone (e.g. thought leadership, announcement, question, celebration).
+2. Decide whether it makes sense for the seller to comment from a professional/sales perspective. Consider: relevance to seller's goal and ICP, risk of seeming spammy, opportunity to add value or start a relationship.
+3. If commenting makes sense: write a short, genuine suggested comment (2-4 sentences) that adds value, references the post, and can open a door without being salesy. If it does not make sense: explain why and leave suggestedComment as an empty string.
+
+Respond only with valid JSON in this exact shape (no markdown, no extra text). The "analyses" array MUST have the same length and order as the posts provided:
+{
+  "analyses": [
+    { "postSummary": "1-2 sentence summary", "shouldComment": true or false, "reason": "1-3 sentences", "suggestedComment": "comment text or empty string" },
+    ... one object per post in the same order
+  ]
+}`;
+
+        const postsBlock = posts.map((p, i) => `### Post ${i + 1}\n**Author:** ${p.author}${p.authorHeadline ? ' | ' + p.authorHeadline : ''}\n**Content:**\n${p.text}\n`).join('\n');
+        const userPrompt = `## LinkedIn posts (analyze each one)\n\n${postsBlock}\n## Commenter (seller) profile\n**Goal:** ${sellerGoal || 'Not specified'}\n**Offer / What they sell:** ${sellerOffer || 'Not specified'}\n**ICP (Ideal Customer Profile):** ${sellerIcp || 'Not specified'}\n**Proof points:** ${sellerProof || 'Not specified'}\n\nProvide one analysis object per post in the "analyses" array, in the same order as the posts above.`;
+
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ];
+        const promptText = messages.map(m => m.content).join(' ');
+        const estimatedInputTokens = Math.ceil(promptText.length / 4);
+        const estimatedOutputTokens = Math.min(800 + posts.length * 350, 4500);
+        const estimatedCost = calculateCost(estimatedInputTokens, estimatedOutputTokens);
+        const estimatedTokensNeeded = Math.ceil(estimatedCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+
+        if (user.balance - user.used < estimatedTokensNeeded) {
+            await connection.rollback();
+            connection.release();
+            return res.status(402).json({
+                error: 'INSUFFICIENT_CREDITS',
+                remaining: user.balance - user.used,
+                needed: estimatedTokensNeeded
+            });
+        }
+
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const model = 'gpt-4o-mini';
+        const completion = await openai.chat.completions.create({
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+            ],
+            response_format: { type: 'json_object' },
+            max_tokens: 4500
+        });
+
+        const rawContent = completion.choices?.[0]?.message?.content?.trim() || '{}';
+        let result;
+        try {
+            result = JSON.parse(rawContent);
+        } catch (e) {
+            result = { analyses: [] };
+        }
+        let analyses = Array.isArray(result.analyses) ? result.analyses : [];
+        while (analyses.length < posts.length) {
+            analyses.push({
+                postSummary: 'Analysis missing.',
+                shouldComment: false,
+                reason: '',
+                suggestedComment: ''
+            });
+        }
+        analyses = analyses.slice(0, posts.length).map(a => ({
+            postSummary: (a && a.postSummary) ? String(a.postSummary) : '',
+            shouldComment: Boolean(a && a.shouldComment),
+            reason: (a && a.reason) ? String(a.reason) : '',
+            suggestedComment: (a && a.suggestedComment) ? String(a.suggestedComment) : ''
+        }));
+
+        const actualInputTokens = completion.usage?.prompt_tokens || estimatedInputTokens;
+        const actualOutputTokens = completion.usage?.completion_tokens || estimatedOutputTokens;
+        const actualCost = calculateCost(actualInputTokens, actualOutputTokens);
+        const tokensUsed = Math.ceil(actualCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+
+        await connection.query(
+            'UPDATE users SET used = used + ? WHERE user_id = ?',
+            [tokensUsed, userId]
+        );
+
+        const transactionId = uuidv4();
+        await connection.query(
+            `INSERT INTO transactions (
+                transaction_id, user_id, prospect_id, process_type, process_description,
+                tokens_used, input_tokens, output_tokens, cost, model
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                transactionId,
+                userId,
+                'post_comment_suggestion',
+                'Analyze posts and suggest comments',
+                tokensUsed,
+                actualInputTokens,
+                actualOutputTokens,
+                actualCost,
+                model
+            ]
+        );
+
+        const [updatedUser] = await connection.query(
+            'SELECT balance, used FROM users WHERE user_id = ?',
+            [userId]
+        );
+
+        await connection.commit();
+        connection.release();
+
+        res.json({
+            success: true,
+            analyses,
+            posts: posts.map(p => ({ author: p.author, authorHeadline: p.authorHeadline, textPreview: p.text.substring(0, 150) + (p.text.length > 150 ? '...' : '') })),
+            creditsUsed: tokensUsed,
+            remaining: updatedUser[0].balance - updatedUser[0].used
+        });
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Post comment suggestion error:', error);
+        res.status(500).json({ error: error.message || 'Post comment suggestion failed' });
+    }
+});
+
 // Job Analyses endpoints
 app.post('/api/job-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {
