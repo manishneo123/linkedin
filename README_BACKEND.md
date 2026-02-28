@@ -103,7 +103,7 @@ const BACKEND_URL = 'https://your-backend-domain.com';
 
 ### Credit System
 
-- **Free Tokens**: Each new user gets 10,000 free tokens
+- **Free Tokens**: Each new user gets 200,000 free tokens
 - **Token Costs**: Based on OpenAI pricing for gpt-4o-mini:
   - Input: $0.15 per 1M tokens
   - Output: $0.60 per 1M tokens

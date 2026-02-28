@@ -1504,6 +1504,218 @@ Respond only with valid JSON in this exact shape (no markdown, no extra text). T
     }
 });
 
+// Connections extract: use AI to extract connection entries from raw listing page text (when DOM selectors fail)
+app.post('/api/connections-extract', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const userId = req.userId;
+        const user = await initializeUser(userId);
+        const rawPageExcerpt = (req.body.rawPageExcerpt && String(req.body.rawPageExcerpt).trim()) || '';
+        if (rawPageExcerpt.length < 50) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ error: 'rawPageExcerpt is required and must be at least 50 characters' });
+        }
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const extractModel = 'gpt-4o-mini';
+        const extractPrompt = `You are given raw text from a LinkedIn "Connections" list page (My Network → Connections). The page lists people with their name, job title/headline, and sometimes location.
+
+Extract EVERY distinct person (connection) visible in the excerpt. For each person return:
+- name: full name as shown
+- headline: job title or headline (e.g. "Software Engineer at X") or empty string if not visible
+- location: location if shown, else empty string
+- profileSlug: the LinkedIn profile slug from URLs like linkedin.com/in/SLUG or /in/SLUG (only the SLUG part, no slashes). If no URL is visible, infer a slug from the name (lowercase, spaces to hyphens) or use empty string.
+
+Return ONLY valid JSON in this exact shape (no markdown, no extra text):
+{
+  "connections": [
+    { "name": "Full Name", "headline": "Title at Company", "location": "City", "profileSlug": "full-name" },
+    ...
+  ]
+}
+Include every distinct person you can identify. Order by appearance. Use empty strings for missing fields.`;
+
+        const excerptForPrompt = rawPageExcerpt.substring(0, 14000);
+        const extractEstInput = Math.ceil((extractPrompt.length + excerptForPrompt.length) / 4);
+        const extractEstOutput = 3000;
+        const extractCost = calculateCost(extractEstInput, extractEstOutput);
+        const extractTokensNeeded = Math.ceil(extractCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+        if (user.balance - user.used < extractTokensNeeded) {
+            await connection.rollback();
+            connection.release();
+            return res.status(402).json({
+                error: 'INSUFFICIENT_CREDITS',
+                remaining: user.balance - user.used,
+                needed: extractTokensNeeded
+            });
+        }
+        const extractCompletion = await openai.chat.completions.create({
+            model: extractModel,
+            messages: [
+                { role: 'system', content: extractPrompt },
+                { role: 'user', content: excerptForPrompt }
+            ],
+            response_format: { type: 'json_object' },
+            max_tokens: 4000
+        });
+        const extractRaw = extractCompletion.choices?.[0]?.message?.content?.trim() || '{}';
+        let extracted;
+        try {
+            extracted = JSON.parse(extractRaw);
+        } catch (e) {
+            extracted = { connections: [] };
+        }
+        const baseUrl = 'https://www.linkedin.com/in/';
+        const connections = (Array.isArray(extracted.connections) ? extracted.connections : [])
+            .filter(c => c && (c.name || c.profileSlug))
+            .map(c => {
+                const slug = (c.profileSlug && String(c.profileSlug).trim().replace(/^\/+|\/+$/g, '')) || '';
+                const url = slug ? (baseUrl + slug.replace(/^https?:\/\/[^/]+\/in\/?/i, '')) : '';
+                return {
+                    name: String(c.name || '').trim(),
+                    headline: String(c.headline || '').trim(),
+                    location: String(c.location || '').trim(),
+                    url: url || ''
+                };
+            })
+            .filter(c => c.name);
+
+        const extInput = extractCompletion.usage?.prompt_tokens || extractEstInput;
+        const extOutput = extractCompletion.usage?.completion_tokens || extractEstOutput;
+        const extCost = calculateCost(extInput, extOutput);
+        const extTokensUsed = Math.ceil(extCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+        await connection.query('UPDATE users SET used = used + ? WHERE user_id = ?', [extTokensUsed, userId]);
+        const extTxnId = uuidv4();
+        await connection.query(
+            `INSERT INTO transactions (transaction_id, user_id, prospect_id, process_type, process_description, tokens_used, input_tokens, output_tokens, cost, model) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+            [extTxnId, userId, 'connections_extract', 'Extract connections from listing page text via AI', extTokensUsed, extInput, extOutput, extCost, extractModel]
+        );
+        const [updatedUser] = await connection.query('SELECT balance, used FROM users WHERE user_id = ?', [userId]);
+        await connection.commit();
+        connection.release();
+        res.json({
+            success: true,
+            connections,
+            creditsUsed: extTokensUsed,
+            remaining: updatedUser[0].balance - updatedUser[0].used
+        });
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Connections extract error:', error);
+        res.status(500).json({ error: error.message || 'Connections extract failed' });
+    }
+});
+
+// Connections score: score a list of connections (name, headline, location, url) against seller profile for warm intro list
+app.post('/api/connections-score', validateApiKey, rateLimitMiddleware, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const userId = req.userId;
+        const user = await initializeUser(userId);
+        const { connections: connectionsInput, profile } = req.body;
+        const connections = Array.isArray(connectionsInput)
+            ? connectionsInput
+                .filter(c => c && (c.name || c.url))
+                .map(c => ({
+                    name: String(c.name || '').trim(),
+                    url: String(c.url || '').trim().split('?')[0],
+                    headline: String(c.headline || '').trim(),
+                    location: String(c.location || '').trim()
+                }))
+                .filter(c => c.url && c.url.includes('/in/'))
+            : [];
+        if (connections.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ error: 'No valid connections provided' });
+        }
+        const sellerGoal = (profile && profile.sellerGoal) ? String(profile.sellerGoal).trim() : '';
+        const icpDefinition = (profile && profile.icpDefinition) ? String(profile.icpDefinition).trim() : '';
+        const sellerOffer = (profile && profile.sellerOffer) ? String(profile.sellerOffer).trim() : '';
+        const profilesText = connections.map((p, i) =>
+            `Profile ${i + 1}:\nName: ${p.name}\nHeadline: ${p.headline}\nLocation: ${p.location || 'Not specified'}\nLinkedIn: ${p.url}`
+        ).join('\n\n---\n\n');
+        const systemContent = 'You are a sales intelligence assistant. Analyze profiles and return valid JSON only.';
+        const userContent = `You are analyzing LinkedIn profiles (connections) to identify which ones are relevant for a seller for warm introductions. Be pragmatic: value not only direct buyers but also influencers and evangelists.
+
+SELLER CONTEXT:
+- Goal: ${sellerGoal || 'Not specified'}
+- ICP Definition: ${icpDefinition || 'Not specified'}
+- Offer: ${sellerOffer || 'Not specified'}
+
+CONNECTIONS:
+${profilesText}
+
+For each profile, determine:
+1. Relevance Score (0-100): How well does this profile match the ICP or represent a useful connection (buyer, influencer, or evangelist)?
+2. Fit Reasons: Why this profile might be a good fit.
+3. Potential Value: Why this person might need the offer or how they could help (buy, recommend, refer).
+4. Decision Power: Exactly one of: Buyer (direct purchaser/decision maker), Influencer (can influence the sale, recommend, champion), Evangelist (can promote, refer, spread the word), Not Relevant.
+
+Return ONLY a JSON object: { "relevantProfiles": [ { "name", "url", "headline", "relevanceScore", "fitReasons", "potentialValue", "decisionPower" } ] }
+Rules: Include all profiles with relevanceScore >= 50 that are Buyer, Influencer, or Evangelist; exclude only Not Relevant. Sort by relevanceScore descending. decisionPower must be one of: Buyer, Influencer, Evangelist, Not Relevant. Return valid JSON only.`;
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const estInput = Math.ceil((systemContent.length + userContent.length) / 4);
+        const estOutput = Math.min(connections.length * 150, 4000);
+        const estimatedCost = calculateCost(estInput, estOutput);
+        const estimatedTokensNeeded = Math.ceil(estimatedCost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+        if (user.balance - user.used < estimatedTokensNeeded) {
+            await connection.rollback();
+            connection.release();
+            return res.status(402).json({
+                error: 'INSUFFICIENT_CREDITS',
+                remaining: user.balance - user.used,
+                needed: estimatedTokensNeeded
+            });
+        }
+        const completion = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+                { role: 'system', content: systemContent },
+                { role: 'user', content: userContent }
+            ],
+            temperature: 0.3,
+            response_format: { type: 'json_object' },
+            max_tokens: 4000
+        });
+        const raw = completion.choices?.[0]?.message?.content?.trim() || '{}';
+        let parsed;
+        try {
+            parsed = JSON.parse(raw);
+        } catch (e) {
+            parsed = { relevantProfiles: [] };
+        }
+        const relevantProfiles = Array.isArray(parsed.relevantProfiles) ? parsed.relevantProfiles : [];
+        const inputTokens = completion.usage?.prompt_tokens || estInput;
+        const outputTokens = completion.usage?.completion_tokens || estOutput;
+        const cost = calculateCost(inputTokens, outputTokens);
+        const tokensUsed = Math.ceil(cost * 1000000 / CREDIT_CONFIG.TOKEN_COST_PER_1M.input);
+        await connection.query('UPDATE users SET used = used + ? WHERE user_id = ?', [tokensUsed, userId]);
+        const txnId = uuidv4();
+        await connection.query(
+            `INSERT INTO transactions (transaction_id, user_id, prospect_id, process_type, process_description, tokens_used, input_tokens, output_tokens, cost, model) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+            [txnId, userId, 'connections_score', 'Score connections for warm intro list', tokensUsed, inputTokens, outputTokens, cost, 'gpt-4o-mini']
+        );
+        const [updatedUser] = await connection.query('SELECT balance, used FROM users WHERE user_id = ?', [userId]);
+        await connection.commit();
+        connection.release();
+        res.json({
+            success: true,
+            relevantProfiles,
+            creditsUsed: tokensUsed,
+            remaining: updatedUser[0].balance - updatedUser[0].used
+        });
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Connections score error:', error);
+        res.status(500).json({ error: error.message || 'Connections score failed' });
+    }
+});
+
 // Job Analyses endpoints
 app.post('/api/job-analyses', validateApiKey, rateLimitMiddleware, async (req, res) => {
     try {

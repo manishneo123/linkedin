@@ -1,6 +1,6 @@
 # LinkedIn Sales Copilot – Backend
 
-Backend API server for **[AI Copilot for LinkedIn](https://chromewebstore.google.com/detail/ai-copilot-for-linkedin/khgklonoehpkpklolblfabajepgpgbic?hl=en&authuser=0)**, the Chrome extension for sales outreach, content creation, comment suggestions, and job applications on LinkedIn.
+Backend API server for **[AI Copilot for LinkedIn](https://chromewebstore.google.com/detail/ai-copilot-for-linkedin/khgklonoehpkpklolblfabajepgpgbic?hl=en&authuser=0)**, the Chrome extension for sales outreach, warm intros from connections, content creation, comment suggestions, and job applications on LinkedIn.
 
 ---
 
@@ -91,6 +91,7 @@ npm run dev
 - **Auth / credits:** `GET /api/credits`, `POST /api/auth/generate-key`
 - **OpenAI proxy:** `POST /api/openai-proxy` — proxy OpenAI with credit tracking
 - **Post comment suggestion:** `POST /api/post-comment-suggestion` — multi-post analysis and suggested comments
+- **Connections (warm intro list):** `POST /api/connections-extract` — extract connection entries from listing page text via AI (when DOM scraping fails); `POST /api/connections-score` — score a list of connections (name, headline, location, url) against seller profile and return Buyer/Influencer/Evangelist with relevance scores
 - **Prospects / analyses:** `POST /api/prospects`, `POST /api/analyses`, etc.
 - **Content / job:** `POST /api/content-analyses`, `POST /api/job-analyses`, and related GET endpoints
 - **Payments:** `GET /api/packages`, `POST /api/create-checkout-session`, `POST /api/webhook` (Stripe)

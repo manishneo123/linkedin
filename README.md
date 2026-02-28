@@ -1,6 +1,6 @@
 # AI Copilot for LinkedIn – Backend & API
 
-This repository is the **backend** for [**AI Copilot for LinkedIn**](https://chromewebstore.google.com/detail/ai-copilot-for-linkedin/khgklonoehpkpklolblfabajepgpgbic?hl=en&authuser=0): the Chrome extension that adds AI-powered sales outreach, content creation, comment suggestions, and job-application tools on LinkedIn.
+This repository is the **backend** for [**AI Copilot for LinkedIn**](https://chromewebstore.google.com/detail/ai-copilot-for-linkedin/khgklonoehpkpklolblfabajepgpgbic?hl=en&authuser=0): the Chrome extension that adds AI-powered sales outreach, warm intros from connections, content creation, comment suggestions, and job-application tools on LinkedIn.
 
 ---
 
