@@ -1623,7 +1623,8 @@ app.post('/api/connections-score', validateApiKey, rateLimitMiddleware, async (r
                     name: String(c.name || '').trim(),
                     url: String(c.url || '').trim().split('?')[0],
                     headline: String(c.headline || '').trim(),
-                    location: String(c.location || '').trim()
+                    location: String(c.location || '').trim(),
+                    followers: String(c.followers || '').trim()
                 }))
                 .filter(c => c.url && c.url.includes('/in/'))
             : [];
@@ -1636,7 +1637,7 @@ app.post('/api/connections-score', validateApiKey, rateLimitMiddleware, async (r
         const icpDefinition = (profile && profile.icpDefinition) ? String(profile.icpDefinition).trim() : '';
         const sellerOffer = (profile && profile.sellerOffer) ? String(profile.sellerOffer).trim() : '';
         const profilesText = connections.map((p, i) =>
-            `Profile ${i + 1}:\nName: ${p.name}\nHeadline: ${p.headline}\nLocation: ${p.location || 'Not specified'}\nLinkedIn: ${p.url}`
+            `Profile ${i + 1}:\nName: ${p.name}\nHeadline: ${p.headline}\nLocation: ${p.location || 'Not specified'}\nFollowers: ${p.followers || 'Not specified'}\nLinkedIn: ${p.url}`
         ).join('\n\n---\n\n');
         const systemContent = 'You are a sales intelligence assistant. Analyze profiles and return valid JSON only.';
         const userContent = `You are analyzing LinkedIn profiles (connections) to identify which ones are relevant for a seller for warm introductions. Be pragmatic: value not only direct buyers but also influencers and evangelists.
@@ -1650,12 +1651,13 @@ CONNECTIONS:
 ${profilesText}
 
 For each profile, determine:
-1. Relevance Score (0-100): How well does this profile match the ICP or represent a useful connection (buyer, influencer, or evangelist)?
-2. Fit Reasons: Why this profile might be a good fit.
+1. Relevance Score (0-100): How well does this profile match the ICP or represent a useful connection (buyer, influencer, or evangelist)? Use follower count when provided: higher reach can signal influence or evangelist potential.
+2. Fit Reasons: Why this profile might be a good fit (consider reach/followers when relevant).
 3. Potential Value: Why this person might need the offer or how they could help (buy, recommend, refer).
 4. Decision Power: Exactly one of: Buyer (direct purchaser/decision maker), Influencer (can influence the sale, recommend, champion), Evangelist (can promote, refer, spread the word), Not Relevant.
 
-Return ONLY a JSON object: { "relevantProfiles": [ { "name", "url", "headline", "relevanceScore", "fitReasons", "potentialValue", "decisionPower" } ] }
+Return ONLY a JSON object: { "relevantProfiles": [ { "name", "url", "headline", "followers", "relevanceScore", "fitReasons", "potentialValue", "decisionPower" } ] }
+For each profile include "followers": copy the follower count from the CONNECTIONS input when provided, else "".
 Rules: Include all profiles with relevanceScore >= 50 that are Buyer, Influencer, or Evangelist; exclude only Not Relevant. Sort by relevanceScore descending. decisionPower must be one of: Buyer, Influencer, Evangelist, Not Relevant. Return valid JSON only.`;
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         const estInput = Math.ceil((systemContent.length + userContent.length) / 4);
