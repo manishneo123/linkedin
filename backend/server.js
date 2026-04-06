@@ -168,7 +168,7 @@ pool.getConnection()
 
 // Credit configuration
 const CREDIT_CONFIG = {
-    FREE_TOKENS: parseInt(process.env.FREE_TOKENS) || 200000,
+    FREE_TOKENS: parseInt(process.env.FREE_TOKENS || '0', 10),
     TOKEN_COST_PER_1M: {
         input: parseFloat(process.env.TOKEN_COST_PER_1M_INPUT) || 0.15,
         output: parseFloat(process.env.TOKEN_COST_PER_1M_OUTPUT) || 0.60
@@ -220,7 +220,7 @@ function generateApiKey() {
     return `${prefix}${randomPart}`;
 }
 
-// Initialize user with free tokens and generate API key if needed
+// Initialize user with configured starting tokens (default 0) and generate API key if needed
 async function initializeUser(userId, userData = {}) {
     try {
         const connection = await pool.getConnection();
@@ -234,7 +234,7 @@ async function initializeUser(userId, userData = {}) {
         if (existing.length === 0) {
             // Generate API key for new user
             const apiKey = generateApiKey();
-            // Create new user with free tokens and API key
+            // Create new user with configured starting balance and API key
             await connection.query(
                 'INSERT INTO users (user_id, balance, used, name, linkedin_profile_url, api_key, api_key_created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
                 [
@@ -3724,6 +3724,6 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`Free tokens per user: ${CREDIT_CONFIG.FREE_TOKENS}`);
+    console.log(`Initial tokens per user: ${CREDIT_CONFIG.FREE_TOKENS}`);
 });
 

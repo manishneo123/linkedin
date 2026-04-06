@@ -44,7 +44,7 @@ STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
 OPENAI_API_KEY=sk-your-openai-api-key
 
 # Credit Configuration
-FREE_TOKENS=10000
+FREE_TOKENS=0
 TOKEN_COST_PER_1M_INPUT=0.15
 TOKEN_COST_PER_1M_OUTPUT=0.60
 ```
@@ -103,7 +103,7 @@ const BACKEND_URL = 'https://your-backend-domain.com';
 
 ### Credit System
 
-- **Free Tokens**: Each new user gets 200,000 free tokens
+- **Initial Tokens**: New users start with configured initial tokens (recommended: 0)
 - **Token Costs**: Based on OpenAI pricing for gpt-4o-mini:
   - Input: $0.15 per 1M tokens
   - Output: $0.60 per 1M tokens

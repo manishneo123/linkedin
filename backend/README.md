@@ -13,7 +13,7 @@ This repo is the **backend** for the AI Copilot for LinkedIn ecosystem:
 
 The extension can run **without this backend** if users supply their own OpenAI API key. When the backend is used, it provides:
 
-- **Credits and billing** — Free tokens for new users, purchase additional credits, Stripe payments.
+- **Credits and billing** — Bring your own OpenAI API key in extension mode, or purchase backend credits via Stripe.
 - **API proxy** — OpenAI requests go through this server; credits are deducted per use.
 - **Persistence** — Store analyses (prospects, content, job analyses, post-comment suggestions) and user/transaction data in MySQL.
 
@@ -73,7 +73,7 @@ cp .env.example .env
 - `STRIPE_SECRET_KEY`: Your Stripe secret key
 - `STRIPE_WEBHOOK_SECRET`: Your Stripe webhook secret
 - `OPENAI_API_KEY`: Your OpenAI API key (for credit-based calls)
-- `FREE_TOKENS`: Initial free tokens per user (default: 10000)
+- `FREE_TOKENS`: Initial tokens per user (default: 0)
 - `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`: MySQL connection
 - `BACKEND_URL`: Public URL of this backend (for CORS / extension config)
 
